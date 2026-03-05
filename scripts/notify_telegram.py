@@ -17,6 +17,10 @@ import os
 import re
 import sys
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 import requests
 

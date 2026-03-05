@@ -16,6 +16,10 @@ import os
 import sys
 import time
 import uuid
+from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 import jwt
 import requests
@@ -63,26 +67,34 @@ def main():
                 }
             )
 
-    # 보유 종목 현재가 조회
+    # 보유 종목 현재가 조회 (유효한 마켓만 필터링)
     if markets:
-        r2 = requests.get(
-            f"{UPBIT_API}/ticker",
-            params={"markets": ",".join(markets)},
-            timeout=10,
-        )
-        for t in r2.json():
-            cur = t["market"].replace("KRW-", "")
-            h = next((h for h in holdings if h["currency"] == cur), None)
-            if h:
-                h["current_price"] = t["trade_price"]
-                h["eval_amount"] = h["balance"] * t["trade_price"]
-                if h["avg_buy_price"] > 0:
-                    h["profit_loss_pct"] = round(
-                        (t["trade_price"] - h["avg_buy_price"])
-                        / h["avg_buy_price"]
-                        * 100,
-                        2,
-                    )
+        valid_markets = []
+        all_markets_r = requests.get(f"{UPBIT_API}/market/all", timeout=10)
+        if all_markets_r.ok:
+            known = {m["market"] for m in all_markets_r.json()}
+            valid_markets = [m for m in markets if m in known]
+
+        if valid_markets:
+            r2 = requests.get(
+                f"{UPBIT_API}/ticker",
+                params={"markets": ",".join(valid_markets)},
+                timeout=10,
+            )
+            if r2.ok:
+                for t in r2.json():
+                    cur = t["market"].replace("KRW-", "")
+                    h = next((h for h in holdings if h["currency"] == cur), None)
+                    if h:
+                        h["current_price"] = t["trade_price"]
+                        h["eval_amount"] = h["balance"] * t["trade_price"]
+                        if h["avg_buy_price"] > 0:
+                            h["profit_loss_pct"] = round(
+                                (t["trade_price"] - h["avg_buy_price"])
+                                / h["avg_buy_price"]
+                                * 100,
+                                2,
+                            )
 
     total_eval = krw_balance + sum(h["eval_amount"] for h in holdings)
     total_invested = sum(h["balance"] * h["avg_buy_price"] for h in holdings)

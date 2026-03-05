@@ -20,6 +20,11 @@ if [ -f .env ]; then
   set -a; source .env; set +a
 fi
 
+# Python 가상환경 활성화
+if [ -f .venv/bin/activate ]; then
+  source .venv/bin/activate
+fi
+
 # 긴급 정지 확인
 if [ "${EMERGENCY_STOP:-false}" = "true" ]; then
   echo "EMERGENCY_STOP 활성화됨. 실행 중단." >&2

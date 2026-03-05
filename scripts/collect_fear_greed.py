@@ -11,6 +11,10 @@ Crypto Fear & Greed Index 수집 스크립트
 import json
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 import requests
 

@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QR Codes - BTC Trader</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:#0d1117; color:#c9d1d9; min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:40px 20px; }
+h1 { font-size:28px; color:#58a6ff; margin-bottom:8px; }
+.subtitle { color:#8b949e; font-size:14px; margin-bottom:40px; }
+.qr-container { display:flex; gap:60px; flex-wrap:wrap; justify-content:center; }
+.qr-box { background:#161b22; border:1px solid #30363d; border-radius:20px; padding:32px; text-align:center; min-width:300px; }
+.qr-box h2 { font-size:18px; margin-bottom:6px; }
+.qr-box .desc { font-size:13px; color:#8b949e; margin-bottom:20px; }
+.qr-canvas { background:white; border-radius:12px; padding:16px; display:inline-block; margin-bottom:16px; }
+.qr-canvas img { display:block; }
+.qr-url { font-size:12px; color:#58a6ff; word-break:break-all; background:#0d1117; padding:8px 12px; border-radius:8px; }
+.qr-box.dashboard { border-color:#238636; }
+.qr-box.dashboard h2 { color:#3fb950; }
+.qr-box.remote { border-color:#9e6a03; }
+.qr-box.remote h2 { color:#f0883e; }
+.footer { margin-top:40px; color:#8b949e; font-size:12px; text-align:center; }
+.footer a { color:#58a6ff; text-decoration:none; }
+</style>
+</head>
+<body>
+
+<h1>BTC Auto Trader</h1>
+<p class="subtitle">Scan QR codes with your iPhone camera</p>
+
+<div class="qr-container">
+  <div class="qr-box dashboard">
+    <h2>Dashboard</h2>
+    <p class="desc">Portfolio, Market Data, Decisions</p>
+    <div class="qr-canvas" id="qr-dashboard"></div>
+    <div class="qr-url" id="url-dashboard">-</div>
+  </div>
+
+  <div class="qr-box remote">
+    <h2>Remote Control</h2>
+    <p class="desc">Emergency Stop, Strategy, Manual Run</p>
+    <div class="qr-canvas" id="qr-remote"></div>
+    <div class="qr-url" id="url-remote">-</div>
+  </div>
+</div>
+
+<div class="footer">
+  <p>Same WiFi network required</p>
+  <p style="margin-top:8px;"><a href="/">Open Dashboard</a> &middot; <a href="/remote.html">Open Remote</a></p>
+</div>
+
+<script>
+var host = window.location.hostname;
+var port = window.location.port || '5555';
+var dashboardUrl = 'http://' + host + ':' + port + '/';
+var remoteUrl = 'http://' + host + ':' + port + '/remote.html';
+
+document.getElementById('url-dashboard').textContent = dashboardUrl;
+document.getElementById('url-remote').textContent = remoteUrl;
+
+new QRCode(document.getElementById('qr-dashboard'), {
+  text: dashboardUrl,
+  width: 256,
+  height: 256,
+  colorDark: '#000000',
+  colorLight: '#ffffff',
+  correctLevel: QRCode.CorrectLevel.M
+});
+
+new QRCode(document.getElementById('qr-remote'), {
+  text: remoteUrl,
+  width: 256,
+  height: 256,
+  colorDark: '#000000',
+  colorLight: '#ffffff',
+  correctLevel: QRCode.CorrectLevel.M
+});
+</script>
+</body>
+</html>

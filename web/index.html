@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>BTC Trader Dashboard</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:#0d1117; color:#c9d1d9; min-height:100vh; }
+.header { background:#161b22; padding:16px 20px; border-bottom:1px solid #30363d; display:flex; justify-content:space-between; align-items:center; }
+.header h1 { font-size:18px; color:#58a6ff; }
+.header .status { display:flex; gap:8px; align-items:center; }
+.dot { width:10px; height:10px; border-radius:50%; display:inline-block; }
+.dot.green { background:#3fb950; }
+.dot.red { background:#f85149; }
+.dot.yellow { background:#d29922; }
+.container { max-width:900px; margin:0 auto; padding:16px; }
+.cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; margin-bottom:16px; }
+.card { background:#161b22; border:1px solid #30363d; border-radius:12px; padding:16px; text-align:center; }
+.card .label { font-size:11px; color:#8b949e; text-transform:uppercase; letter-spacing:1px; margin-bottom:8px; }
+.card .value { font-size:22px; font-weight:700; }
+.card .sub { font-size:12px; color:#8b949e; margin-top:4px; }
+.green { color:#3fb950; }
+.red { color:#f85149; }
+.yellow { color:#d29922; }
+.blue { color:#58a6ff; }
+.section { background:#161b22; border:1px solid #30363d; border-radius:12px; padding:16px; margin-bottom:16px; }
+.section h2 { font-size:14px; color:#8b949e; margin-bottom:12px; border-bottom:1px solid #30363d; padding-bottom:8px; }
+.decision-row { display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid #21262d; }
+.decision-row:last-child { border-bottom:none; }
+.decision-badge { padding:4px 10px; border-radius:20px; font-size:12px; font-weight:600; }
+.badge-buy { background:#1a3a2a; color:#3fb950; }
+.badge-sell { background:#3a1a1a; color:#f85149; }
+.badge-hold { background:#2a2a1a; color:#d29922; }
+.decision-time { font-size:11px; color:#8b949e; }
+.decision-reason { font-size:13px; color:#c9d1d9; margin-top:4px; }
+.indicator-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:10px; }
+.indicator { display:flex; justify-content:space-between; padding:8px; background:#0d1117; border-radius:8px; }
+.indicator .name { font-size:13px; color:#8b949e; }
+.indicator .val { font-size:13px; font-weight:600; }
+.nav { display:flex; justify-content:center; gap:12px; padding:12px; background:#161b22; border-top:1px solid #30363d; position:fixed; bottom:0; left:0; right:0; }
+.nav a { color:#8b949e; text-decoration:none; font-size:13px; padding:8px 16px; border-radius:8px; }
+.nav a.active { background:#21262d; color:#58a6ff; }
+.loading { text-align:center; padding:40px; color:#8b949e; }
+.refresh-btn { background:none; border:1px solid #30363d; color:#8b949e; padding:6px 12px; border-radius:6px; cursor:pointer; font-size:12px; }
+.refresh-btn:active { background:#21262d; }
+@media(max-width:400px) { .cards { grid-template-columns:repeat(2,1fr); } }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>BTC Trader</h1>
+  <div class="status">
+    <span id="status-dot" class="dot yellow"></span>
+    <span id="status-text" style="font-size:12px;color:#8b949e;">Loading...</span>
+    <button class="refresh-btn" onclick="loadAll()">Refresh</button>
+  </div>
+</div>
+
+<div class="container">
+  <!-- 포트폴리오 카드 -->
+  <div class="cards" id="portfolio-cards">
+    <div class="card"><div class="label">Total Value</div><div class="value" id="total-value">-</div></div>
+    <div class="card"><div class="label">KRW</div><div class="value" id="krw-balance">-</div></div>
+    <div class="card"><div class="label">BTC</div><div class="value" id="btc-amount">-</div><div class="sub" id="btc-value"></div></div>
+    <div class="card"><div class="label">P&L</div><div class="value" id="pnl">-</div></div>
+  </div>
+
+  <!-- 시장 지표 -->
+  <div class="section">
+    <h2>Market Indicators</h2>
+    <div class="indicator-grid" id="indicators">
+      <div class="indicator"><span class="name">BTC Price</span><span class="val" id="ind-price">-</span></div>
+      <div class="indicator"><span class="name">RSI(14)</span><span class="val" id="ind-rsi">-</span></div>
+      <div class="indicator"><span class="name">FGI</span><span class="val" id="ind-fgi">-</span></div>
+      <div class="indicator"><span class="name">SMA20 Gap</span><span class="val" id="ind-sma">-</span></div>
+      <div class="indicator"><span class="name">Strategy</span><span class="val blue" id="ind-strategy">-</span></div>
+      <div class="indicator"><span class="name">DRY RUN</span><span class="val" id="ind-dryrun">-</span></div>
+    </div>
+  </div>
+
+  <!-- 최근 결정 -->
+  <div class="section">
+    <h2>Recent Decisions</h2>
+    <div id="decisions-list"><div class="loading">Loading...</div></div>
+  </div>
+</div>
+
+<nav class="nav">
+  <a href="/" class="active">Dashboard</a>
+  <a href="/remote.html">Remote</a>
+</nav>
+
+<script>
+const fmt = (n) => {
+  if(n===null||n===undefined) return '-';
+  return Number(n).toLocaleString('ko-KR');
+};
+
+async function fetchJSON(url) {
+  try { const r = await fetch(url); return await r.json(); }
+  catch(e) { return {error: e.message}; }
+}
+
+async function loadPortfolio() {
+  const d = await fetchJSON('/api/portfolio');
+  if(d.error) return;
+  document.getElementById('krw-balance').textContent = fmt(Math.floor(d.total_krw||0));
+  const btc = (d.coins||[]).find(c=>c.currency==='BTC');
+  if(btc) {
+    document.getElementById('btc-amount').textContent = (btc.balance||0).toFixed(6);
+    document.getElementById('btc-value').textContent = fmt(Math.floor(btc.eval_amount||0))+' KRW';
+    const pnl = btc.profit_loss_pct||0;
+    const el = document.getElementById('pnl');
+    el.textContent = (pnl>=0?'+':'')+pnl.toFixed(2)+'%';
+    el.className = 'value '+(pnl>=0?'green':'red');
+  } else {
+    document.getElementById('btc-amount').textContent = '0';
+    document.getElementById('pnl').textContent = '-';
+  }
+  const total = Math.floor((d.total_krw||0)+(d.coins||[]).reduce((s,c)=>s+(c.eval_amount||0),0));
+  document.getElementById('total-value').textContent = fmt(total);
+}
+
+async function loadMarket() {
+  const d = await fetchJSON('/api/market');
+  if(d.error) return;
+  const price = d.current_price?.trade_price;
+  if(price) document.getElementById('ind-price').textContent = fmt(price);
+  const ti = d.technical_indicators;
+  if(ti) {
+    const rsiEl = document.getElementById('ind-rsi');
+    rsiEl.textContent = (ti.rsi_14||0).toFixed(1);
+    rsiEl.className = 'val '+(ti.rsi_14<=30?'green':ti.rsi_14>=70?'red':'');
+    const sma = ti.sma_20_deviation_pct;
+    if(sma!==undefined) {
+      const smaEl = document.getElementById('ind-sma');
+      smaEl.textContent = (sma>=0?'+':'')+sma.toFixed(2)+'%';
+      smaEl.className = 'val '+(sma<=-5?'green':sma>=5?'red':'');
+    }
+  }
+}
+
+async function loadStatus() {
+  const d = await fetchJSON('/api/status');
+  if(d.error) return;
+  const dot = document.getElementById('status-dot');
+  const txt = document.getElementById('status-text');
+  if(d.emergency_stop==='true') { dot.className='dot red'; txt.textContent='STOPPED'; }
+  else if(d.dry_run==='true') { dot.className='dot yellow'; txt.textContent='DRY RUN'; }
+  else { dot.className='dot green'; txt.textContent='LIVE'; }
+  document.getElementById('ind-strategy').textContent = d.strategy||'-';
+  const dryEl = document.getElementById('ind-dryrun');
+  dryEl.textContent = d.dry_run==='true'?'ON':'OFF';
+  dryEl.className = 'val '+(d.dry_run==='true'?'yellow':'green');
+  // FGI는 별도 수집 필요 - status에서 간략 표시
+}
+
+async function loadFGI() {
+  // Fear & Greed는 market API에 포함 안 됨 -> 별도 호출 또는 Supabase에서
+  try {
+    const d = await fetchJSON('/api/market');
+    // market data에 FGI가 없으므로 placeholder
+  } catch(e) {}
+}
+
+async function loadDecisions() {
+  const list = await fetchJSON('/api/decisions');
+  const container = document.getElementById('decisions-list');
+  if(!Array.isArray(list)||list.length===0) {
+    container.innerHTML = '<div class="loading">No decisions yet</div>';
+    return;
+  }
+  container.innerHTML = list.slice(0,10).map(d=>{
+    const badge = d.decision==='매수'?'badge-buy':d.decision==='매도'?'badge-sell':'badge-hold';
+    const label = d.decision||'관망';
+    const time = d.created_at? new Date(d.created_at).toLocaleString('ko-KR',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'';
+    const reason = d.reason||'';
+    const conf = d.confidence?Math.round(d.confidence*100)+'%':'';
+    return `<div class="decision-row">
+      <div><span class="decision-badge ${badge}">${label}</span> <span style="font-size:12px;color:#8b949e;margin-left:8px;">${conf}</span>
+        <div class="decision-reason">${reason.substring(0,80)}</div></div>
+      <div class="decision-time">${time}</div>
+    </div>`;
+  }).join('');
+}
+
+async function loadAll() {
+  await Promise.all([loadPortfolio(), loadMarket(), loadStatus(), loadDecisions()]);
+}
+
+loadAll();
+setInterval(loadAll, 60000); // 1분마다 갱신
+</script>
+</body>
+</html>

@@ -26,10 +26,10 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-
 import jwt
 import requests
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 UPBIT_API = "https://api.upbit.com/v1"
 

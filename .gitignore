@@ -1,10 +1,22 @@
+# === 환경별 설정 (머신마다 다름) ===
 .env
-__pycache__/
-*.pyc
 .venv/
 venv/
+
+# === 런타임 데이터 (머신마다 다름) ===
 data/charts/*.png
 data/snapshots/
+data/tavily_usage.json
 logs/executions/
 logs/claude_responses/
+
+# === Supabase 로컬 설정 ===
+supabase/.temp/
+supabase/config.toml
+
+# === Python ===
+__pycache__/
+*.pyc
+
+# === 기타 ===
 *.sqlite

@@ -277,12 +277,29 @@ def qr_page():
     import qrcode
     ip = get_local_ip()
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 5555
-    url = f"http://{ip}:{port}"
-    img = qrcode.make(url)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode()
-    return render_template_string(QR_HTML, qr_b64=b64, url=url)
+    dashboard_url = f"http://{ip}:{port}"
+    remote_url_file = PROJECT_ROOT / "data" / "remote_url.txt"
+    try:
+        claude_url = remote_url_file.read_text().strip()
+    except FileNotFoundError:
+        claude_url = ""
+
+    qr_items = [
+        {"label": "Dashboard", "url": dashboard_url},
+    ]
+    if claude_url and "pending" not in claude_url:
+        qr_items.append({"label": "Claude Code Remote", "url": claude_url})
+    qr_data = []
+    for item in qr_items:
+        img = qrcode.make(item["url"])
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        qr_data.append({
+            "label": item["label"],
+            "url": item["url"],
+            "b64": base64.b64encode(buf.getvalue()).decode(),
+        })
+    return render_template_string(QR_HTML, qr_items=qr_data)
 
 
 QR_HTML = """
@@ -295,22 +312,32 @@ QR_HTML = """
 <style>
 body { background: #0d1117; color: #e6edf3; font-family: -apple-system, sans-serif;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  min-height: 100vh; margin: 0; }
+  min-height: 100vh; margin: 0; padding: 20px; }
 h1 { font-size: 22px; margin-bottom: 8px; }
 p { color: #8b949e; font-size: 14px; margin-bottom: 24px; }
-.qr-box { background: #fff; padding: 20px; border-radius: 16px; }
-.qr-box img { width: 280px; height: 280px; display: block; }
-.url { margin-top: 20px; font-size: 18px; font-weight: 700; color: #58a6ff; }
-.hint { margin-top: 12px; font-size: 13px; color: #8b949e; }
+.qr-grid { display: flex; flex-wrap: wrap; gap: 32px; justify-content: center; }
+.qr-card { display: flex; flex-direction: column; align-items: center; }
+.qr-label { font-size: 16px; font-weight: 700; margin-bottom: 12px; }
+.qr-box { background: #fff; padding: 16px; border-radius: 16px; }
+.qr-box img { width: 220px; height: 220px; display: block; }
+.qr-url { margin-top: 12px; font-size: 14px; font-weight: 600; color: #58a6ff; }
+.hint { margin-top: 24px; font-size: 13px; color: #8b949e; }
 </style>
 </head>
 <body>
 <h1>Crypto Bot Remote</h1>
 <p>iPhone 카메라로 QR코드를 스캔하세요</p>
-<div class="qr-box">
-  <img src="data:image/png;base64,{{ qr_b64 }}" alt="QR Code">
+<div class="qr-grid">
+{% for item in qr_items %}
+  <div class="qr-card">
+    <div class="qr-label">{{ item.label }}</div>
+    <div class="qr-box">
+      <img src="data:image/png;base64,{{ item.b64 }}" alt="{{ item.label }}">
+    </div>
+    <div class="qr-url">{{ item.url }}</div>
+  </div>
+{% endfor %}
 </div>
-<div class="url">{{ url }}</div>
 <div class="hint">같은 Wi-Fi 네트워크에 연결되어 있어야 합니다</div>
 </body>
 </html>

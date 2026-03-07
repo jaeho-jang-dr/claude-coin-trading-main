@@ -22,6 +22,7 @@ import os
 import sys
 import time
 import uuid
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -32,6 +33,30 @@ import requests
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 UPBIT_API = "https://api.upbit.com/v1"
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+LOCK_FILE = PROJECT_DIR / "data" / "trading.lock"
+KST = timezone(timedelta(hours=9))
+
+
+def acquire_lock():
+    """정규 매매 실행 중 락파일 생성"""
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LOCK_FILE.write_text(json.dumps({
+        "process": "execute_trade",
+        "pid": os.getpid(),
+        "timestamp": datetime.now(KST).isoformat(),
+    }))
+
+
+def release_lock():
+    """락파일 해제"""
+    try:
+        if LOCK_FILE.exists():
+            data = json.loads(LOCK_FILE.read_text())
+            if data.get("pid") == os.getpid():
+                LOCK_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def make_auth_header(query_string: str) -> dict:
@@ -85,31 +110,35 @@ def execute(side: str, market: str, amount: str):
             "timestamp": ts,
         }
 
-    # 4) 주문 실행
-    body = {"market": market, "side": side}
-    if side == "bid":
-        body["ord_type"] = "price"  # 시장가 매수
-        body["price"] = amount
-    else:
-        body["ord_type"] = "market"  # 시장가 매도
-        body["volume"] = amount
+    # 4) 주문 실행 (락파일로 단타 봇과 동시 실행 방지)
+    acquire_lock()
+    try:
+        body = {"market": market, "side": side}
+        if side == "bid":
+            body["ord_type"] = "price"  # 시장가 매수
+            body["price"] = amount
+        else:
+            body["ord_type"] = "market"  # 시장가 매도
+            body["volume"] = amount
 
-    qs = urlencode(body)
-    headers = make_auth_header(qs)
+        qs = urlencode(body)
+        headers = make_auth_header(qs)
 
-    r = requests.post(f"{UPBIT_API}/orders", json=body, headers=headers, timeout=10)
-    response = r.json()
+        r = requests.post(f"{UPBIT_API}/orders", json=body, headers=headers, timeout=10)
+        response = r.json()
 
-    return {
-        "success": r.ok,
-        "dry_run": False,
-        "side": side,
-        "market": market,
-        "amount": amount,
-        "response": response,
-        "error": None if r.ok else json.dumps(response, ensure_ascii=False),
-        "timestamp": ts,
-    }
+        return {
+            "success": r.ok,
+            "dry_run": False,
+            "side": side,
+            "market": market,
+            "amount": amount,
+            "response": response,
+            "error": None if r.ok else json.dumps(response, ensure_ascii=False),
+            "timestamp": ts,
+        }
+    finally:
+        release_lock()
 
 
 if __name__ == "__main__":

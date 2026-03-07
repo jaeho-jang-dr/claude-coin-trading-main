@@ -117,6 +117,8 @@ claude-coin-trading/
 │   ├── capture_chart.py           # Playwright 차트 캡처
 │   ├── execute_trade.py           # 매매 실행 (안전장치 내장)
 │   ├── get_portfolio.py           # 포트폴리오 조회
+│   ├── collect_ai_signal.py        # AI 복합 시그널 수집 (6가지 실시간 분석)
+│   ├── short_term_trader.py       # AI 단타 트레이딩 봇 (뉴스/급등급락/고래 3전략)
 │   ├── notify_telegram.py         # 텔레그램 알림 전송
 │   ├── run_analysis.sh            # 전체 분석 파이프라인 (cron용)
 │   ├── cron_run.sh                # cron 실행 래퍼 (로깅, 에러 알림)
@@ -146,7 +148,7 @@ bash scripts/setup_cron.sh status     # 등록 상태 확인
 bash scripts/setup_cron.sh remove     # cron 해제
 ```
 
-파이프라인: `cron_run.sh` → .env 로드 → 긴급정지 확인 → `run_analysis.sh` (데이터 수집 + 프롬프트 조립) → `claude -p` 분석/실행 → DB 저장 → 텔레그램 알림
+파이프라인: `cron_run.sh` → .env 로드 → 긴급정지 확인 → `run_analysis.sh` (데이터 수집 + AI 복합 시그널 + 프롬프트 조립) → `claude -p` 분석/실행 → DB 저장 → 텔레그램 알림
 
 **cron_run.sh 기능:**
 - `.venv` Python 가상환경 자동 활성화

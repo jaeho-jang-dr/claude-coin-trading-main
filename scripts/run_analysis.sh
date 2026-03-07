@@ -57,6 +57,10 @@ python3 scripts/capture_chart.py > "${SNAPSHOT_DIR}/chart_paths.json" 2>/dev/nul
 python3 scripts/get_portfolio.py > "${SNAPSHOT_DIR}/portfolio.json" 2>/dev/null \
   || echo '{"error":"portfolio 조회 실패"}' > "${SNAPSHOT_DIR}/portfolio.json"
 
+# 6. AI 복합 시그널 수집
+python3 scripts/collect_ai_signal.py > "${SNAPSHOT_DIR}/ai_signal.json" 2>/dev/null \
+  || echo '{"error":"ai_signal 수집 실패"}' > "${SNAPSHOT_DIR}/ai_signal.json"
+
 echo "[$(date)] 데이터 수집 완료. 프롬프트 생성 중..." >&2
 
 # 데이터 로드
@@ -65,6 +69,7 @@ MARKET_DATA=$(cat "${SNAPSHOT_DIR}/market_data.json")
 FEAR_GREED=$(cat "${SNAPSHOT_DIR}/fear_greed.json")
 NEWS=$(cat "${SNAPSHOT_DIR}/news.json")
 PORTFOLIO=$(cat "${SNAPSHOT_DIR}/portfolio.json")
+AI_SIGNAL=$(cat "${SNAPSHOT_DIR}/ai_signal.json")
 
 # Supabase에서 과거 결정 조회 (최근 10건) - PostgREST API 사용
 PAST_DECISIONS="[]"
@@ -115,6 +120,11 @@ ${NEWS}
 [현재 포트폴리오]
 ═══════════════════════════════════════════
 ${PORTFOLIO}
+
+═══════════════════════════════════════════
+[AI 복합 시그널]
+═══════════════════════════════════════════
+${AI_SIGNAL}
 
 ═══════════════════════════════════════════
 [과거 의사결정 (최근 10건)]

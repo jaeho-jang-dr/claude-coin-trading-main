@@ -91,6 +91,44 @@ if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
     2>/dev/null || echo "[]")
 fi
 
+# ETH/BTC 비율 및 도미넌스 데이터 수집
+ETH_DATA=$(python3 -c "
+import requests, json, statistics
+try:
+    btc = requests.get('https://api.upbit.com/v1/ticker', params={'markets': 'KRW-BTC'}, timeout=5).json()[0]
+    eth = requests.get('https://api.upbit.com/v1/ticker', params={'markets': 'KRW-ETH'}, timeout=5).json()[0]
+    btc_d = requests.get('https://api.upbit.com/v1/candles/days', params={'market': 'KRW-BTC', 'count': '60'}, timeout=5).json()
+    eth_d = requests.get('https://api.upbit.com/v1/candles/days', params={'market': 'KRW-ETH', 'count': '60'}, timeout=5).json()
+    btc_p = [c['trade_price'] for c in reversed(btc_d)]
+    eth_p = [c['trade_price'] for c in reversed(eth_d)]
+    ratios = [e/b for b, e in zip(btc_p, eth_p)]
+    mean_r = statistics.mean(ratios)
+    std_r = statistics.stdev(ratios)
+    z = (ratios[-1] - mean_r) / std_r
+    print(json.dumps({
+        'eth_price': eth['trade_price'],
+        'eth_change_24h': round(eth['signed_change_rate']*100, 2),
+        'eth_btc_ratio': round(ratios[-1], 6),
+        'eth_btc_ratio_avg60': round(mean_r, 6),
+        'eth_btc_z_score': round(z, 2),
+        'btc_volume_24h': round(btc['acc_trade_price_24h']/1e8),
+        'eth_volume_24h': round(eth['acc_trade_price_24h']/1e8),
+    }))
+except: print('{}')
+" 2>/dev/null || echo '{}')
+
+# 이전 결정 성과 평가 데이터 조회
+PERFORMANCE_REVIEW="[]"
+if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
+  PERFORMANCE_REVIEW=$(curl -s \
+    "${SUPABASE_URL}/rest/v1/decisions?select=decision,confidence,current_price,profit_loss,reason,created_at&profit_loss=not.is.null&order=created_at.desc&limit=10" \
+    -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+    -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+    2>/dev/null || echo "[]")
+fi
+
+echo "[$(date)] 프롬프트 생성 완료 (ETH/성과 포함)" >&2
+
 # 프롬프트를 stdout으로 출력
 cat <<PROMPT_EOF
 당신은 암호화폐 자동매매 AI 트레이더입니다.
@@ -105,6 +143,11 @@ ${STRATEGY}
 [시장 데이터 - OHLCV, 기술지표]
 ═══════════════════════════════════════════
 ${MARKET_DATA}
+
+═══════════════════════════════════════════
+[ETH/BTC 비율 및 시장 구조]
+═══════════════════════════════════════════
+${ETH_DATA}
 
 ═══════════════════════════════════════════
 [공포탐욕지수]
@@ -132,6 +175,17 @@ ${AI_SIGNAL}
 ${PAST_DECISIONS}
 
 ═══════════════════════════════════════════
+[이전 결정 사후 성과 평가]
+═══════════════════════════════════════════
+${PERFORMANCE_REVIEW}
+
+위 성과 데이터에서 profit_loss 값의 의미:
+- 관망 결정: 양수 = 안 사서 다행(가격 하락), 음수 = 기회 놓침(가격 상승)
+- 매수 결정: 양수 = 수익, 음수 = 손실
+- 매도 결정: 양수 = 잘 팔았음(가격 하락), 음수 = 너무 일찍 팔았음(가격 상승)
+이전 결정의 정확도를 분석하고, 같은 실수를 반복하지 마세요.
+
+═══════════════════════════════════════════
 [사용자 피드백 (미반영)]
 ═══════════════════════════════════════════
 ${FEEDBACK}
@@ -146,9 +200,23 @@ $(date '+%Y-%m-%d %H:%M:%S KST')
 ═══════════════════════════════════════════
 
 1. 위 모든 데이터를 종합하여 시장 상황을 분석하세요.
-2. 전략 문서의 매수/매도/관망 조건과 대조하여 결정하세요.
+
+2. **매수 조건은 점수제입니다.** 전략 문서의 점수 기준표에 따라 각 조건의 점수를 계산하고,
+   합산 점수가 임계점 이상이면 매수하세요. JSON에 buy_score 필드를 포함하세요.
+
 3. 사용자 피드백이 있다면 반드시 반영하세요.
-4. 결정을 내린 후, 아래 순서대로 실행하세요:
+
+4. **전략 전환 판단**: 전략 문서의 "전략 전환 가이드라인"을 기준으로
+   현재 전략이 적절한지 평가하세요. 전환이 필요하면 strategy_switch_recommendation에
+   구체적인 전환 방향과 근거를 제시하세요 (실제 전환은 사용자 승인 후).
+
+5. **이전 결정 성과 리뷰**: profit_loss 데이터를 분석하여 최근 판단의 정확도를 평가하고,
+   이번 결정에 반영하세요.
+
+6. **ETH/BTC 비율 모니터링**: ETH/BTC z-score가 -2 이하 또는 +2 이상이면
+   시장 구조 변화 신호로 보고 risk_alerts에 포함하세요.
+
+7. 결정을 내린 후, 아래 순서대로 실행하세요:
 
    a) 결정이 매수 또는 매도인 경우:
       python3 scripts/execute_trade.py [bid|ask] KRW-BTC [금액|수량]
@@ -156,5 +224,9 @@ $(date '+%Y-%m-%d %H:%M:%S KST')
    b) 텔레그램 알림 전송:
       python3 scripts/notify_telegram.py trade "[결정 요약]" "[상세 근거]"
 
-5. 최종 결과를 JSON 형식으로 출력하세요.
+8. 최종 결과를 JSON 형식으로 출력하세요. 반드시 다음 필드를 포함:
+   - decision, confidence, reason, buy_score (점수 내역)
+   - strategy_switch_recommendation (전환 제안 또는 "없음")
+   - performance_review (이전 결정 정확도 요약)
+   - eth_btc_signal (ETH/BTC 비율 분석)
 PROMPT_EOF

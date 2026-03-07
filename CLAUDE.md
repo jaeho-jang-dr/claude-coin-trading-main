@@ -185,7 +185,7 @@ cd ~/path/to/claude-coin-trading && claude
 |---------|--------|------|
 | `DRY_RUN` | `true` | true: 분석만, false: 실제 매매 |
 | `MAX_TRADE_AMOUNT` | `100000` | 1회 매매 금액 상한 (KRW) |
-| `MAX_DAILY_TRADES` | `3` | 일일 매매 횟수 상한 |
+| `MAX_DAILY_TRADES` | `6` | 일일 매매 횟수 상한 |
 | `MAX_POSITION_RATIO` | `0.5` | 총 자산 대비 최대 투자 비율 |
 | `MIN_TRADE_INTERVAL_HOURS` | `4` | 최소 매매 간격 (시간) |
 | `EMERGENCY_STOP` | `false` | true: 모든 매매 즉시 중지 |

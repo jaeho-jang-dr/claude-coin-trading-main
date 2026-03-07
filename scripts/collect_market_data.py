@@ -125,6 +125,54 @@ def stochastic(
 
 
 # ── 메인 ────────────────────────────────────────────────
+def collect_eth_btc_ratio() -> dict:
+    """ETH/BTC 비율 및 시장 구조 데이터를 수집한다."""
+    try:
+        import statistics
+
+        eth_ticker = api_get("/ticker", {"markets": "KRW-ETH"})[0]
+        btc_ticker = api_get("/ticker", {"markets": "KRW-BTC"})[0]
+        time.sleep(0.15)
+
+        btc_daily = api_get("/candles/days", {"market": "KRW-BTC", "count": "60"})
+        time.sleep(0.15)
+        eth_daily = api_get("/candles/days", {"market": "KRW-ETH", "count": "60"})
+
+        btc_prices = [c["trade_price"] for c in reversed(btc_daily)]
+        eth_prices = [c["trade_price"] for c in reversed(eth_daily)]
+        n = min(len(btc_prices), len(eth_prices))
+
+        ratios = [eth_prices[i] / btc_prices[i] for i in range(n)]
+        mean_r = statistics.mean(ratios)
+        std_r = statistics.stdev(ratios) if len(ratios) > 1 else 0.001
+        z_score = (ratios[-1] - mean_r) / std_r
+
+        # ETH RSI
+        eth_closes = [c["trade_price"] for c in reversed(eth_daily)]
+        eth_rsi = rsi(eth_closes, 14)
+
+        return {
+            "eth_price": eth_ticker["trade_price"],
+            "eth_change_24h": round(eth_ticker["signed_change_rate"] * 100, 2),
+            "eth_volume_24h_krw": round(eth_ticker["acc_trade_price_24h"]),
+            "eth_rsi_14": round(eth_rsi, 2),
+            "eth_btc_ratio": round(ratios[-1], 6),
+            "eth_btc_ratio_avg60": round(mean_r, 6),
+            "eth_btc_ratio_min60": round(min(ratios), 6),
+            "eth_btc_ratio_max60": round(max(ratios), 6),
+            "eth_btc_z_score": round(z_score, 2),
+            "eth_btc_signal": (
+                "ETH 극단적 저평가" if z_score < -2
+                else "ETH 저평가" if z_score < -1
+                else "ETH 고평가" if z_score > 1
+                else "ETH 극단적 고평가" if z_score > 2
+                else "정상 범위"
+            ),
+        }
+    except Exception as e:
+        return {"error": f"ETH 데이터 수집 실패: {e}"}
+
+
 def main(market: str = "KRW-BTC"):
     ticker = api_get("/ticker", {"markets": market})[0]
     daily = api_get("/candles/days", {"market": market, "count": "30"})
@@ -139,6 +187,10 @@ def main(market: str = "KRW-BTC"):
 
     buy_vol = sum(t["trade_volume"] for t in trades if t["ask_bid"] == "BID")
     sell_vol = sum(t["trade_volume"] for t in trades if t["ask_bid"] == "ASK")
+
+    # ETH/BTC 비율 및 시장 구조
+    time.sleep(0.15)
+    eth_btc = collect_eth_btc_ratio()
 
     snapshot = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S+09:00"),
@@ -160,6 +212,7 @@ def main(market: str = "KRW-BTC"):
             "ratio": round(ob["total_bid_size"] / max(ob["total_ask_size"], 1e-8), 4),
         },
         "trade_pressure": {"buy_volume": buy_vol, "sell_volume": sell_vol},
+        "eth_btc_analysis": eth_btc,
         "candles_daily": daily,
         "candles_4h": list(reversed(four_h)),
     }

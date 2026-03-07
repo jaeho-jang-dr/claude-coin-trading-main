@@ -70,5 +70,11 @@ RESPONSE=$(echo "$PROMPT" | claude -p --dangerously-skip-permissions --allowedTo
 echo "$RESPONSE" > "$RESPONSE_FILE"
 echo "[$(date)] claude 응답 저장: ${RESPONSE_FILE}" >> "$LOG_FILE"
 
-# 4. 완료
+# 4. Supabase에 결정 기록 + 이전 결정 성과 업데이트
+echo "[$(date)] Supabase 저장 중..." >> "$LOG_FILE"
+echo "$RESPONSE" | python3 scripts/save_decision.py 2>>"$LOG_FILE" || {
+  echo "[$(date)] WARNING: Supabase 저장 실패 (치명적 아님)" >> "$LOG_FILE"
+}
+
+# 5. 완료
 echo "[$(date)] === cron 실행 완료 ===" >> "$LOG_FILE"

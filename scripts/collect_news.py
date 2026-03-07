@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-Tavily API를 사용한 암호화폐 뉴스 수집 스크립트
+Tavily API를 사용한 암호화폐 + 매크로 뉴스 수집 스크립트
 
-수집: 최근 24시간 BTC 관련 뉴스 최대 10건
-감성 분석은 LLM이 수행 (이 스크립트는 수집만 담당)
+조회 구성 (1회 실행당 5 API 호출):
+  - 크립토 3종: BTC 시장, 알트코인/ETH, 크립토 규제/기관
+  - 매크로 2종: 지정학/전쟁/유가, 경제/금리/고용
+
+월간 한도: 999 API 호출 (Tavily 무료 티어)
+  - 6회/일 x 5호출 = 30/일 x 31일 = 930/월 (여유 69호출)
 
 출력: JSON (stdout)
 """
@@ -19,7 +23,6 @@ import requests
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-# Windows cp949 인코딩 이슈 방지
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 
@@ -27,12 +30,60 @@ TAVILY_API = "https://api.tavily.com/search"
 MONTHLY_LIMIT = 999
 USAGE_FILE = Path(__file__).resolve().parent.parent / "data" / "tavily_usage.json"
 
-# 기본 조회 건수: crypto 7 + macro 4 = 11건/회, 하루 3회 = 33건/일
-QUERIES = [
-    {"query": "비트코인 Bitcoin BTC 시장", "category": "crypto", "max_results": 7},
-    {"query": "war geopolitics oil sanctions economy crisis 전쟁 금리 경제위기", "category": "macro", "max_results": 4},
+# 크립토/매크로 쿼리 풀
+# 주중(월~금): 크립토 3 + 매크로 2 = 5 호출
+# 주말(토~일): 크립토 4 + 매크로 2 = 6 호출
+# 월간 예산: 주중 30/일 x 22일 + 주말 36/일 x 9일 = 984 < 999
+
+CRYPTO_QUERIES = [
+    {
+        "query": "비트코인 Bitcoin BTC 가격 시장 전망",
+        "category": "crypto_btc",
+        "max_results": 5,
+    },
+    {
+        "query": "이더리움 Ethereum ETH 알트코인 altcoin crypto market",
+        "category": "crypto_alt",
+        "max_results": 3,
+    },
+    {
+        "query": "crypto regulation institutional ETF 암호화폐 규제 기관투자",
+        "category": "crypto_regulation",
+        "max_results": 3,
+    },
+    # 주말 전용 (4번째 크립토)
+    {
+        "query": "Bitcoin whale on-chain mining 비트코인 고래 온체인 채굴 해시레이트",
+        "category": "crypto_onchain",
+        "max_results": 3,
+        "weekend_only": True,
+    },
 ]
-NORMAL_PER_RUN = sum(q["max_results"] for q in QUERIES)  # 11
+
+MACRO_QUERIES = [
+    {
+        "query": "war geopolitics oil sanctions 전쟁 지정학 유가 제재",
+        "category": "macro_geo",
+        "max_results": 3,
+    },
+    {
+        "query": "Federal Reserve interest rate economy employment CPI 금리 경제 고용 인플레이션",
+        "category": "macro_economy",
+        "max_results": 3,
+    },
+]
+
+
+def _build_queries() -> list:
+    """요일에 따라 쿼리 목록을 구성한다."""
+    is_weekend = datetime.now().weekday() >= 5  # 5=토, 6=일
+    queries = []
+    for q in CRYPTO_QUERIES:
+        if q.get("weekend_only") and not is_weekend:
+            continue
+        queries.append({k: v for k, v in q.items() if k != "weekend_only"})
+    queries.extend(MACRO_QUERIES)
+    return queries
 
 
 def _load_usage() -> dict:
@@ -51,29 +102,31 @@ def _save_usage(data: dict):
 
 
 def _budget_queries(usage: dict) -> list:
-    """잔여 한도에 맞춰 조회 건수를 조정한다.
-
-    - 잔여 >= 11: 정상 (crypto 7 + macro 4)
-    - 잔여 1~10: 잔여만큼만 (crypto 우선 배분)
-    - 잔여 0: 조회 불가
-    """
+    """잔여 한도에 맞춰 쿼리를 조정한다."""
     remaining = MONTHLY_LIMIT - usage["count"]
     if remaining <= 0:
         return []
-    if remaining >= NORMAL_PER_RUN:
-        return [dict(q) for q in QUERIES]
-    # 잔여 부족 → crypto 우선, 나머지 macro
-    crypto_count = min(remaining, 7)
-    macro_count = min(remaining - crypto_count, 4)
+
+    queries = _build_queries()
+    calls_needed = len(queries)
+
+    if remaining >= calls_needed:
+        return queries
+
+    # 잔여 부족 -> 우선순위대로 배분
+    priority = ["crypto_btc", "macro_geo", "crypto_alt", "macro_economy", "crypto_regulation", "crypto_onchain"]
     adjusted = []
-    if crypto_count > 0:
-        adjusted.append({"query": QUERIES[0]["query"], "category": "crypto", "max_results": crypto_count})
-    if macro_count > 0:
-        adjusted.append({"query": QUERIES[1]["query"], "category": "macro", "max_results": macro_count})
+    for cat in priority:
+        if remaining <= 0:
+            break
+        q = next((q for q in queries if q["category"] == cat), None)
+        if q:
+            adjusted.append(dict(q))
+            remaining -= 1
     return adjusted
 
 
-def fetch_news(api_key: str, query: str, max_results: int = 10):
+def fetch_news(api_key: str, query: str, max_results: int = 5):
     r = requests.post(
         TAVILY_API,
         json={
@@ -114,7 +167,8 @@ def main():
             f"Tavily 월간 한도 소진: {usage['count']}/{MONTHLY_LIMIT} (잔여 {remaining}건)"
         )
 
-    requested = sum(q["max_results"] for q in queries)
+    api_calls = len(queries)
+    is_weekend = datetime.now().weekday() >= 5
 
     all_articles = {}
     for q in queries:
@@ -125,24 +179,37 @@ def main():
             if a["url"] not in all_articles:
                 all_articles[a["url"]] = a
 
-    # 성공 후 사용량 기록
-    usage["count"] += requested
+    # API 호출 수 기준으로 사용량 기록
+    usage["count"] += api_calls
     _save_usage(usage)
 
     articles_list = list(all_articles.values())
+
+    # 카테고리별 집계
+    categories = {}
+    for a in articles_list:
+        cat = a["category"]
+        categories[cat] = categories.get(cat, 0) + 1
+
+    day_type = "weekend" if is_weekend else "weekday"
+    calls_per_day = api_calls * 6
+
     result = {
         "timestamp": datetime.now().isoformat(),
-        "queries": [q["query"] for q in queries],
+        "day_type": day_type,
+        "queries": [q["query"][:50] for q in queries],
         "articles_count": len(articles_list),
-        "crypto_count": sum(1 for a in articles_list if a["category"] == "crypto"),
-        "macro_count": sum(1 for a in articles_list if a["category"] == "macro"),
+        "by_category": categories,
         "articles": articles_list,
         "tavily_usage": {
             "month": usage["month"],
-            "used": usage["count"],
+            "api_calls_used": usage["count"],
             "limit": MONTHLY_LIMIT,
             "remaining": MONTHLY_LIMIT - usage["count"],
-            "this_run": requested,
+            "this_run_calls": api_calls,
+            "day_type": f"{day_type} ({api_calls} calls/run)",
+            "daily_budget": f"{calls_per_day}/day ({day_type})",
+            "monthly_projection": "weekday 30 x 22 + weekend 36 x 9 = 984/month",
         },
     }
     print(json.dumps(result, indent=2, ensure_ascii=False))

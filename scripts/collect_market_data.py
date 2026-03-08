@@ -14,37 +14,18 @@ Upbit 시장 데이터 수집 스크립트
 
 from __future__ import annotations
 
-import hashlib
 import json
-import os
+import statistics
 import sys
 import time
-import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-import jwt
 import requests
 
 UPBIT_API = "https://api.upbit.com/v1"
-
-
-# ── Upbit JWT 인증 ──────────────────────────────────────
-def make_auth_header(query_string: str | None = None) -> dict:
-    payload = {
-        "access_key": os.environ["UPBIT_ACCESS_KEY"],
-        "nonce": str(uuid.uuid4()),
-        "timestamp": int(time.time() * 1000),
-    }
-    if query_string:
-        payload["query_hash"] = hashlib.sha512(
-            query_string.encode()
-        ).hexdigest()
-        payload["query_hash_alg"] = "SHA512"
-    token = jwt.encode(payload, os.environ["UPBIT_SECRET_KEY"], algorithm="HS256")
-    return {"Authorization": f"Bearer {token}"}
 
 
 # ── API 호출 (Exponential Backoff 포함) ─────────────────
@@ -235,8 +216,6 @@ def calc_atr(highs: list[float], lows: list[float], closes: list[float], period:
 def collect_eth_btc_ratio() -> dict:
     """ETH/BTC 비율 및 시장 구조 데이터를 수집한다."""
     try:
-        import statistics
-
         eth_ticker = api_get("/ticker", {"markets": "KRW-ETH"})[0]
         btc_ticker = api_get("/ticker", {"markets": "KRW-BTC"})[0]
         time.sleep(0.15)
@@ -252,6 +231,8 @@ def collect_eth_btc_ratio() -> dict:
         ratios = [eth_prices[i] / btc_prices[i] for i in range(n)]
         mean_r = statistics.mean(ratios)
         std_r = statistics.stdev(ratios) if len(ratios) > 1 else 0.001
+        if std_r == 0:
+            std_r = 0.001
         z_score = (ratios[-1] - mean_r) / std_r
 
         # ETH RSI
@@ -271,8 +252,8 @@ def collect_eth_btc_ratio() -> dict:
             "eth_btc_signal": (
                 "ETH 극단적 저평가" if z_score < -2
                 else "ETH 저평가" if z_score < -1
-                else "ETH 고평가" if z_score > 1
                 else "ETH 극단적 고평가" if z_score > 2
+                else "ETH 고평가" if z_score > 1
                 else "정상 범위"
             ),
         }

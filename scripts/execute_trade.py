@@ -52,13 +52,14 @@ def acquire_lock():
             lock_time = datetime.fromisoformat(data["timestamp"])
             age = (datetime.now(KST) - lock_time).total_seconds()
             lock_pid = data.get("pid", 0)
-            # 프로세스 생존 확인
+            # 프로세스 생존 확인 (pid=0이면 검사 생략)
             pid_alive = False
-            try:
-                os.kill(lock_pid, 0)
-                pid_alive = True
-            except (OSError, ProcessLookupError):
-                pid_alive = False
+            if lock_pid > 0:
+                try:
+                    os.kill(lock_pid, 0)
+                    pid_alive = True
+                except (OSError, ProcessLookupError):
+                    pid_alive = False
             if age > LOCK_TIMEOUT_SECONDS or not pid_alive:
                 print(f"[lock] stale lock 제거 (age={age:.0f}s, pid={lock_pid}, alive={pid_alive})", file=sys.stderr)
                 LOCK_FILE.unlink(missing_ok=True)
@@ -163,7 +164,10 @@ def execute(side: str, market: str, amount: str):
         headers = make_auth_header(qs)
 
         r = requests.post(f"{UPBIT_API}/orders", json=body, headers=headers, timeout=10)
-        response = r.json()
+        try:
+            response = r.json()
+        except (ValueError, requests.exceptions.JSONDecodeError):
+            response = {"raw_response": r.text[:500]}
 
         # 잔고 부족, 최소 주문 금액 등 API 에러 상세 처리
         error_msg = None

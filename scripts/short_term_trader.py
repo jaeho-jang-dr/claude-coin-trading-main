@@ -393,12 +393,26 @@ class ShortTermTrader:
         "https://rss.app/feeds/v1.1/tSmEpMocyHlHkMnR.xml",  # 코인니스 한국어
     ]
 
+    # 뉴스 감성 키워드 (클래스 레벨 상수 — 매 스캔마다 재생성 방지)
+    POSITIVE_WORDS = frozenset({
+        "surge", "rally", "soar", "breakout", "bull", "pump",
+        "approval", "etf approved", "institutional buy", "record high",
+        "all-time high", "ath", "moon", "adoption",
+        "급등", "상승", "돌파", "호재", "승인", "최고가", "반등", "강세",
+    })
+    NEGATIVE_WORDS = frozenset({
+        "crash", "plunge", "dump", "ban", "hack", "fraud",
+        "regulation", "crackdown", "war", "sanctions", "collapse",
+        "liquidation", "sell-off", "bearish", "fear",
+        "급락", "폭락", "해킹", "규제", "금지", "전쟁", "제재", "하락", "약세",
+    })
+
     async def scan_news(self):
         """RSS 피드로 뉴스 헤드라인 스캔 (무료, API 키 불필요)"""
         import xml.etree.ElementTree as ET
 
-        # 이미 본 헤드라인 추적 (중복 방지)
-        seen_titles: set[str] = set()
+        # 이미 본 헤드라인 추적 (중복 방지, FIFO 순서 보장)
+        seen_titles: dict[str, None] = {}  # insertion-ordered dict as ordered set
 
         while self.running:
             try:
@@ -409,18 +423,8 @@ class ShortTermTrader:
 
                 self.last_news_scan = now
 
-                positive_words = {
-                    "surge", "rally", "soar", "breakout", "bull", "pump",
-                    "approval", "etf approved", "institutional buy", "record high",
-                    "all-time high", "ath", "moon", "adoption",
-                    "급등", "상승", "돌파", "호재", "승인", "최고가", "반등", "강세",
-                }
-                negative_words = {
-                    "crash", "plunge", "dump", "ban", "hack", "fraud",
-                    "regulation", "crackdown", "war", "sanctions", "collapse",
-                    "liquidation", "sell-off", "bearish", "fear",
-                    "급락", "폭락", "해킹", "규제", "금지", "전쟁", "제재", "하락", "약세",
-                }
+                positive_words = self.POSITIVE_WORDS
+                negative_words = self.NEGATIVE_WORDS
 
                 pos_count = neg_count = 0
                 urgent_signals = []
@@ -456,7 +460,7 @@ class ShortTermTrader:
 
                             if title_key in seen_titles:
                                 continue
-                            seen_titles.add(title_key)
+                            seen_titles[title_key] = None
                             new_headlines += 1
 
                             # 헤드라인만으로 키워드 감성 분석
@@ -478,9 +482,12 @@ class ShortTermTrader:
                     except Exception:
                         continue
 
-                # seen 세트가 너무 커지지 않도록 관리 (최근 500건만 유지)
+                # seen dict가 너무 커지지 않도록 관리 (최근 300건만 유지)
                 if len(seen_titles) > 500:
-                    seen_titles = set(list(seen_titles)[-300:])
+                    # dict preserves insertion order; keep newest 300
+                    keys = list(seen_titles)
+                    for k in keys[:-300]:
+                        del seen_titles[k]
 
                 total = pos_count + neg_count
                 if total > 0:
@@ -538,16 +545,30 @@ class ShortTermTrader:
                 confidence=min(abs(self.news_sentiment_score), 1.0),
                 reason=f"뉴스 강한 긍정 (score: {self.news_sentiment_score:+.2f})",
             )
-        elif self.news_sentiment_score <= -0.4:
-            return TradeSignal(
-                strategy="news",
-                action="sell",
-                confidence=min(abs(self.news_sentiment_score), 1.0),
-                reason=f"뉴스 강한 부정 (score: {self.news_sentiment_score:+.2f})",
-            )
-        return None
+        # score <= -0.4 (guaranteed by early return above)
+        return TradeSignal(
+            strategy="news",
+            action="sell",
+            confidence=min(abs(self.news_sentiment_score), 1.0),
+            reason=f"뉴스 강한 부정 (score: {self.news_sentiment_score:+.2f})",
+        )
 
     # ── 전략 2: 급등/급락 리바운드 ────────────────────
+
+    def _get_recent_trade_volumes(self, now: float, window_sec: int = 60) -> tuple[float, float]:
+        """최근 N초 체결의 매수/매도 거래량 합계 (중복 계산 방지)"""
+        buy_vol = 0.0
+        sell_vol = 0.0
+        cutoff = now - window_sec
+        # deque는 시간순이므로 뒤에서부터 탐색하면 빠르게 중단 가능
+        for t in reversed(self.trade_history):
+            if t["time"] < cutoff:
+                break
+            if t["side"] == "BID":
+                buy_vol += t["volume"]
+            elif t["side"] == "ASK":
+                sell_vol += t["volume"]
+        return buy_vol, sell_vol
 
     def check_spike_signal(self) -> TradeSignal | None:
         """급등/급락 후 리바운드 시그널"""
@@ -555,9 +576,10 @@ class ShortTermTrader:
             return None
 
         now = time.time()
+        cutoff = now - SPIKE_WINDOW_SEC
         window_prices = [
             p["price"] for p in self.price_history
-            if now - p["time"] <= SPIKE_WINDOW_SEC
+            if p["time"] > cutoff
         ]
 
         if len(window_prices) < 10:
@@ -574,51 +596,55 @@ class ShortTermTrader:
             recovery = (current - low) / low * 100
             if recovery >= 0.3 and current < high * 0.995:
                 # 체결 강도로 반등 확인
-                recent_trades = [
-                    t for t in self.trade_history
-                    if now - t["time"] <= 60  # 최근 1분
-                ]
-                if recent_trades:
-                    buy_vol = sum(t["volume"] for t in recent_trades if t["side"] == "BID")
-                    sell_vol = sum(t["volume"] for t in recent_trades if t["side"] == "ASK")
-                    total = buy_vol + sell_vol
-                    if total > 0 and buy_vol / total > 0.55:
-                        return TradeSignal(
-                            strategy="spike",
-                            action="buy",
-                            confidence=min(drop_pct / 3, 1.0),
-                            reason=(
-                                f"급락 {drop_pct:.1f}% 후 반등 {recovery:.1f}% "
-                                f"(매수 체결 {buy_vol/total*100:.0f}%)"
-                            ),
-                        )
+                buy_vol, sell_vol = self._get_recent_trade_volumes(now)
+                total = buy_vol + sell_vol
+                if total > 0 and buy_vol / total > 0.55:
+                    return TradeSignal(
+                        strategy="spike",
+                        action="buy",
+                        confidence=min(drop_pct / 3, 1.0),
+                        reason=(
+                            f"급락 {drop_pct:.1f}% 후 반등 {recovery:.1f}% "
+                            f"(매수 체결 {buy_vol/total*100:.0f}%)"
+                        ),
+                    )
 
         # 급등 후 되돌림 감지 (보유 중일 때 매도 시그널)
         surge_pct = (high - low) / low * 100
         if surge_pct >= SPIKE_THRESHOLD_PCT:
             pullback = (high - current) / high * 100
             if pullback >= 0.3 and current > low * 1.005:
-                recent_trades = [
-                    t for t in self.trade_history
-                    if now - t["time"] <= 60
-                ]
-                if recent_trades:
-                    buy_vol = sum(t["volume"] for t in recent_trades if t["side"] == "BID")
-                    sell_vol = sum(t["volume"] for t in recent_trades if t["side"] == "ASK")
-                    total = buy_vol + sell_vol
-                    if total > 0 and sell_vol / total > 0.55:
-                        return TradeSignal(
-                            strategy="spike",
-                            action="sell",
-                            confidence=min(surge_pct / 3, 1.0),
-                            reason=(
-                                f"급등 {surge_pct:.1f}% 후 되돌림 {pullback:.1f}% "
-                                f"(매도 체결 {sell_vol/total*100:.0f}%)"
-                            ),
-                        )
+                buy_vol, sell_vol = self._get_recent_trade_volumes(now)
+                total = buy_vol + sell_vol
+                if total > 0 and sell_vol / total > 0.55:
+                    return TradeSignal(
+                        strategy="spike",
+                        action="sell",
+                        confidence=min(surge_pct / 3, 1.0),
+                        reason=(
+                            f"급등 {surge_pct:.1f}% 후 되돌림 {pullback:.1f}% "
+                            f"(매도 체결 {sell_vol/total*100:.0f}%)"
+                        ),
+                    )
         return None
 
     # ── 전략 3: 고래 추종 ─────────────────────────────
+
+    def _get_recent_whale_krw(self, now: float) -> tuple[float, float, int]:
+        """최근 고래 매수/매도 KRW 합계와 건수 (중복 필터링 방지)"""
+        buy_krw = 0.0
+        sell_krw = 0.0
+        count = 0
+        cutoff = now - WHALE_RATIO_WINDOW_SEC
+        for w in reversed(self.whale_recent):
+            if w["time"] < cutoff:
+                break
+            count += 1
+            if w["side"] == "BID":
+                buy_krw += w["krw"]
+            elif w["side"] == "ASK":
+                sell_krw += w["krw"]
+        return buy_krw, sell_krw, count
 
     def check_whale_signal(self) -> TradeSignal | None:
         """고래 금액 비율 기반 추종 시그널 (v2)"""
@@ -626,16 +652,11 @@ class ShortTermTrader:
             return None
 
         now = time.time()
-        recent_whales = [
-            w for w in self.whale_recent
-            if now - w["time"] <= WHALE_RATIO_WINDOW_SEC
-        ]
+        buy_krw, sell_krw, count = self._get_recent_whale_krw(now)
 
-        if len(recent_whales) < 2:
+        if count < 2:
             return None
 
-        buy_krw = sum(w["krw"] for w in recent_whales if w["side"] == "BID")
-        sell_krw = sum(w["krw"] for w in recent_whales if w["side"] == "ASK")
         total_krw = buy_krw + sell_krw
 
         if total_krw < WHALE_THRESHOLD_KRW:
@@ -668,16 +689,14 @@ class ShortTermTrader:
 
     def is_sell_pressure_blocking(self) -> bool:
         """매도 압력 방패: 고래 매도가 매수의 N배 이상이면 매수 차단 (v2)"""
-        now = time.time()
-        recent_whales = [
-            w for w in self.whale_recent
-            if now - w["time"] <= WHALE_RATIO_WINDOW_SEC
-        ]
-        if not recent_whales:
+        if not self.whale_recent:
             return False
 
-        buy_krw = sum(w["krw"] for w in recent_whales if w["side"] == "BID")
-        sell_krw = sum(w["krw"] for w in recent_whales if w["side"] == "ASK")
+        now = time.time()
+        buy_krw, sell_krw, count = self._get_recent_whale_krw(now)
+
+        if count == 0:
+            return False
 
         if buy_krw == 0 and sell_krw > 0:
             return True
@@ -1065,8 +1084,9 @@ class ShortTermTrader:
 
                 # 3) 가격 급변동 (10분 내 1.5% 이상)
                 if len(self.price_history) >= 60:
-                    prices = [p["price"] for p in self.price_history]
-                    price_10m_ago = prices[-min(600, len(prices))]
+                    # 직접 deque 인덱싱 — 전체 리스트 생성 방지
+                    idx = max(0, len(self.price_history) - 600)
+                    price_10m_ago = self.price_history[idx]["price"]
                     change_pct = (self.current_price - price_10m_ago) / price_10m_ago * 100
 
                     if abs(change_pct) >= 1.5 and now - last_alerts.get("급변동", 0) > ALERT_COOLDOWN:
@@ -1311,7 +1331,7 @@ class ShortTermTrader:
         log.info(summary)
 
         # 세션 요약 DB 기록
-        whale_count = sum(1 for _ in self.whale_recent)
+        whale_count = len(self.whale_recent)
         db_insert("scalp_sessions", {
             "start_time": (self.closed_positions[0].entry_time.isoformat()
                           if self.closed_positions else datetime.now(KST).isoformat()),

@@ -45,15 +45,15 @@ def collect_funding_rate() -> dict:
     rates = [float(d["fundingRate"]) for d in data]
     avg_rate = sum(rates) / len(rates)
 
-    # 펀딩레이트 해석
+    # 펀딩레이트 해석 (극단값 먼저 체크)
     if rate > 0.01:
         signal = "과열_롱"
     elif rate > 0.005:
         signal = "롱_우세"
-    elif rate < -0.005:
-        signal = "숏_우세"
     elif rate < -0.01:
         signal = "과열_숏"
+    elif rate < -0.005:
+        signal = "숏_우세"
     else:
         signal = "중립"
 

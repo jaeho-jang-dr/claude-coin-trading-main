@@ -48,10 +48,12 @@ def supabase_post(table: str, row: dict) -> dict | None:
             json=row,
             timeout=10,
         )
+        if not r.ok:
+            print(f"[save_decision] {table} INSERT 실패 ({r.status_code}): {r.text[:500]}", file=sys.stderr)
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        print(f"[save_decision] {table} INSERT 실패: {e}", file=sys.stderr)
+        print(f"[save_decision] {table} INSERT 예외: {e}", file=sys.stderr)
         return None
 
 
@@ -112,7 +114,7 @@ def extract_json_from_response(text: str) -> dict | None:
         if c == '\\' and in_string:
             escape_next = True
             continue
-        if c == '"' and not escape_next:
+        if c == '"':
             in_string = not in_string
             continue
         if in_string:
@@ -159,10 +161,11 @@ def map_decision(raw: str) -> str:
     raw_lower = raw.lower().strip()
     if raw_lower in ("hold", "관망"):
         return "관망"
-    if raw_lower in ("buy", "bid", "매수"):
+    if raw_lower in ("buy", "bid", "매수", "strong_buy"):
         return "매수"
-    if raw_lower in ("sell", "ask", "매도"):
+    if raw_lower in ("sell", "ask", "매도", "strong_sell", "reduce"):
         return "매도"
+    print(f"[save_decision] 알 수 없는 결정값 '{raw}' → 관망으로 처리", file=sys.stderr)
     return "관망"
 
 
@@ -333,8 +336,10 @@ def save_portfolio_snapshot():
     """현재 포트폴리오 스냅샷을 저장한다."""
     try:
         import subprocess
+        venv_python = Path(__file__).resolve().parent.parent / ".venv" / "bin" / "python3"
+        python_cmd = str(venv_python) if venv_python.exists() else "python3"
         result = subprocess.run(
-            ["python3", "scripts/get_portfolio.py"],
+            [python_cmd, "scripts/get_portfolio.py"],
             capture_output=True, text=True, timeout=30,
             cwd=Path(__file__).resolve().parent.parent,
         )

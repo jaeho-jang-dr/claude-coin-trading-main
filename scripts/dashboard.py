@@ -285,7 +285,8 @@ def qr_page():
         claude_url = ""
 
     qr_items = [
-        {"label": "Dashboard", "url": dashboard_url},
+        {"label": "Dashboard (LTE/원격)", "url": "https://dashboard.wwwmoksu.com"},
+        {"label": "Dashboard (로컬)", "url": dashboard_url},
     ]
     if claude_url and "pending" not in claude_url:
         qr_items.append({"label": "Claude Code Remote", "url": claude_url})

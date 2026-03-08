@@ -55,35 +55,86 @@ def supabase_post(table: str, row: dict) -> dict | None:
         return None
 
 
+def _try_parse(s: str) -> dict | None:
+    """JSON 파싱 시도. 후행 쉼표 등 경미한 오류도 정리 후 재시도."""
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+    # Claude가 간혹 후행 쉼표를 출력 (,} 또는 ,])
+    cleaned = re.sub(r",\s*([}\]])", r"\1", s)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        return None
+
+
 def extract_json_from_response(text: str) -> dict | None:
     """claude -p 응답에서 JSON 블록을 추출한다.
 
-    Claude는 보통 ```json ... ``` 으로 감싸서 출력한다.
-    중첩 JSON 객체가 있으므로 re.DOTALL로 전체를 캡처한다.
+    5단계 fallback으로 다양한 Claude 출력 형식에 대응:
+    1) ```json 코드펜스
+    2) ``` 코드펜스 (json 태그 없이)
+    3) 전체 텍스트가 JSON
+    4) 가장 큰 { ... } 블록 (중첩 지원)
+    5) 불완전 JSON 복구 시도
     """
     # 1) ```json 코드펜스 (가장 일반적)
     m = re.search(r"```json\s*\n(.*?)\n\s*```", text, re.DOTALL)
     if m:
-        try:
-            return json.loads(m.group(1))
-        except json.JSONDecodeError:
-            pass
+        result = _try_parse(m.group(1))
+        if result:
+            return result
 
     # 2) ``` 코드펜스 (json 태그 없이)
     m = re.search(r"```\s*\n(\{.*\})\n\s*```", text, re.DOTALL)
     if m:
-        try:
-            return json.loads(m.group(1))
-        except json.JSONDecodeError:
-            pass
+        result = _try_parse(m.group(1))
+        if result:
+            return result
 
     # 3) 전체 텍스트가 JSON
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
+    result = _try_parse(text.strip())
+    if result:
+        return result
 
-    # 4) 텍스트 내에서 가장 큰 { ... } 블록 찾기
+    # 4) 텍스트 내에서 가장 큰 { ... } 블록 찾기 (depth 기반)
+    best = None
+    best_len = 0
+    depth = 0
+    start = -1
+    in_string = False
+    escape_next = False
+    for i, c in enumerate(text):
+        if escape_next:
+            escape_next = False
+            continue
+        if c == '\\' and in_string:
+            escape_next = True
+            continue
+        if c == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0 and start >= 0:
+                candidate = text[start:i + 1]
+                parsed = _try_parse(candidate)
+                if parsed and len(candidate) > best_len:
+                    best = parsed
+                    best_len = len(candidate)
+                start = -1
+
+    if best:
+        return best
+
+    # 5) 최후: 불완전 JSON 복구 (닫는 괄호 부족 시)
     depth = 0
     start = -1
     for i, c in enumerate(text):
@@ -93,11 +144,12 @@ def extract_json_from_response(text: str) -> dict | None:
             depth += 1
         elif c == '}':
             depth -= 1
-            if depth == 0 and start >= 0:
-                try:
-                    return json.loads(text[start:i + 1])
-                except json.JSONDecodeError:
-                    start = -1
+    if start >= 0 and depth > 0:
+        # 닫는 괄호 추가하여 복구 시도
+        candidate = text[start:] + "}" * depth
+        result = _try_parse(candidate)
+        if result:
+            return result
 
     return None
 
@@ -212,6 +264,8 @@ def update_past_performance():
     except Exception:
         return
 
+    # 결정 유형별로 그룹화하여 일괄 업데이트 (N+1 → 최대 3회 API 호출)
+    groups: dict[str, list[str]] = {}  # profit_loss_value -> [id, ...]
     for d in decisions:
         decision_price = d.get("current_price")
         if not decision_price or decision_price == 0:
@@ -229,12 +283,21 @@ def update_past_performance():
         else:
             profit_loss = 0
 
-        requests.patch(
-            f"{SUPABASE_URL}/rest/v1/decisions?id=eq.{d['id']}",
-            headers=supabase_headers(),
-            json={"profit_loss": round(profit_loss, 2)},
-            timeout=10,
-        )
+        pl_rounded = str(round(profit_loss, 2))
+        groups.setdefault(pl_rounded, []).append(str(d["id"]))
+
+    # 같은 profit_loss 값을 가진 결정들을 한 번에 업데이트
+    for pl_value, ids in groups.items():
+        id_filter = ",".join(f"'{i}'" for i in ids)
+        try:
+            requests.patch(
+                f"{SUPABASE_URL}/rest/v1/decisions?id=in.({id_filter})",
+                headers=supabase_headers(),
+                json={"profit_loss": float(pl_value)},
+                timeout=10,
+            )
+        except Exception as e:
+            print(f"[save_decision] 성과 일괄 업데이트 실패: {e}", file=sys.stderr)
 
 
 def mark_feedback_applied():

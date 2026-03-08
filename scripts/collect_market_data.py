@@ -47,12 +47,20 @@ def make_auth_header(query_string: str | None = None) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
-# ── API 호출 ────────────────────────────────────────────
-def api_get(path: str, params: dict | None = None) -> dict | list:
+# ── API 호출 (Exponential Backoff 포함) ─────────────────
+def api_get(path: str, params: dict | None = None, max_retries: int = 3) -> dict | list:
     url = f"{UPBIT_API}{path}"
     if params:
         url += "?" + "&".join(f"{k}={v}" for k, v in params.items())
-    r = requests.get(url, timeout=10)
+    for attempt in range(max_retries):
+        r = requests.get(url, timeout=10)
+        if r.status_code == 429:
+            wait = 2 ** attempt  # 1s, 2s, 4s
+            print(f"[rate_limit] 429 received, retrying in {wait}s...", file=sys.stderr)
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        return r.json()
     r.raise_for_status()
     return r.json()
 
@@ -94,11 +102,25 @@ def rsi(prices: list[float], period: int = 14) -> float:
 
 
 def macd(prices: list[float]) -> dict:
-    ema12 = ema(prices, 12)
-    ema26 = ema(prices, 26)
-    m = ema12 - ema26
-    # Signal = MACD의 9일 EMA (간략화)
-    s = m * 0.8
+    """MACD = EMA12 - EMA26, Signal = MACD의 9일 EMA"""
+    if len(prices) < 26:
+        return {"macd": 0, "signal": 0, "histogram": 0}
+    # 각 시점의 MACD 값을 계산하여 시그널 EMA를 구한다
+    k12 = 2 / 13
+    k26 = 2 / 27
+    ema12_val = prices[0]
+    ema26_val = prices[0]
+    macd_series = []
+    for p in prices[1:]:
+        ema12_val = p * k12 + ema12_val * (1 - k12)
+        ema26_val = p * k26 + ema26_val * (1 - k26)
+        macd_series.append(ema12_val - ema26_val)
+    m = macd_series[-1]
+    # Signal = MACD 시리즈의 9일 EMA
+    k9 = 2 / 10
+    s = macd_series[0]
+    for v in macd_series[1:]:
+        s = v * k9 + s * (1 - k9)
     return {"macd": round(m, 2), "signal": round(s, 2), "histogram": round(m - s, 2)}
 
 
@@ -117,11 +139,96 @@ def bollinger(prices: list[float], period: int = 20) -> dict:
 def stochastic(
     highs: list[float], lows: list[float], closes: list[float], period: int = 14
 ) -> dict:
-    h = max(highs[-period:])
-    l = min(lows[-period:])
-    c = closes[-1]
-    k = 50.0 if h == l else ((c - l) / (h - l)) * 100
-    return {"k": round(k, 2), "d": round(k, 2)}
+    """스토캐스틱 %K (Fast) 및 %D (3-period SMA of %K)."""
+    if len(closes) < period + 2:
+        return {"k": 50.0, "d": 50.0}
+    # 최근 3개 봉의 %K를 계산하여 %D = 3-period SMA(%K)
+    k_values = []
+    for offset in range(3):
+        idx = len(closes) - 1 - offset
+        if idx < period - 1:
+            break
+        h = max(highs[idx - period + 1 : idx + 1])
+        l = min(lows[idx - period + 1 : idx + 1])
+        c = closes[idx]
+        k_val = 50.0 if h == l else ((c - l) / (h - l)) * 100
+        k_values.append(k_val)
+    k = k_values[0]
+    d = sum(k_values) / len(k_values)
+    return {"k": round(k, 2), "d": round(d, 2)}
+
+
+def calc_adx(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> dict:
+    """ADX (Average Directional Index) — 추세 강도 측정.
+
+    Returns: {"adx": float, "plus_di": float, "minus_di": float, "regime": str}
+    regime: "trending" (ADX >= 25), "ranging" (ADX < 20), "transitioning" (20-25)
+    """
+    n = len(closes)
+    if n < period + 1:
+        return {"adx": 0, "plus_di": 0, "minus_di": 0, "regime": "unknown"}
+
+    # True Range, +DM, -DM
+    tr_list, plus_dm_list, minus_dm_list = [], [], []
+    for i in range(1, n):
+        hi, lo, prev_c = highs[i], lows[i], closes[i - 1]
+        tr_list.append(max(hi - lo, abs(hi - prev_c), abs(lo - prev_c)))
+        up = highs[i] - highs[i - 1]
+        down = lows[i - 1] - lows[i]
+        plus_dm_list.append(up if up > down and up > 0 else 0)
+        minus_dm_list.append(down if down > up and down > 0 else 0)
+
+    # Wilder smoothing (initial SMA then EMA-like)
+    atr = sum(tr_list[:period]) / period
+    plus_dm_s = sum(plus_dm_list[:period]) / period
+    minus_dm_s = sum(minus_dm_list[:period]) / period
+
+    dx_list = []
+    for i in range(period, len(tr_list)):
+        atr = (atr * (period - 1) + tr_list[i]) / period
+        plus_dm_s = (plus_dm_s * (period - 1) + plus_dm_list[i]) / period
+        minus_dm_s = (minus_dm_s * (period - 1) + minus_dm_list[i]) / period
+
+        plus_di = (plus_dm_s / atr * 100) if atr > 0 else 0
+        minus_di = (minus_dm_s / atr * 100) if atr > 0 else 0
+        di_sum = plus_di + minus_di
+        dx = abs(plus_di - minus_di) / di_sum * 100 if di_sum > 0 else 0
+        dx_list.append(dx)
+
+    if not dx_list:
+        return {"adx": 0, "plus_di": 0, "minus_di": 0, "regime": "unknown"}
+
+    # ADX = SMA of DX (first period), then Wilder smooth
+    adx = sum(dx_list[:period]) / min(period, len(dx_list))
+    for i in range(period, len(dx_list)):
+        adx = (adx * (period - 1) + dx_list[i]) / period
+
+    # Final +DI, -DI
+    plus_di = (plus_dm_s / atr * 100) if atr > 0 else 0
+    minus_di = (minus_dm_s / atr * 100) if atr > 0 else 0
+
+    regime = "trending" if adx >= 25 else "ranging" if adx < 20 else "transitioning"
+
+    return {
+        "adx": round(adx, 2),
+        "plus_di": round(plus_di, 2),
+        "minus_di": round(minus_di, 2),
+        "regime": regime,
+    }
+
+
+def calc_atr(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> float:
+    """ATR (Average True Range) — 변동성 측정."""
+    if len(closes) < period + 1:
+        return 0.0
+    tr_list = []
+    for i in range(1, len(closes)):
+        hi, lo, prev_c = highs[i], lows[i], closes[i - 1]
+        tr_list.append(max(hi - lo, abs(hi - prev_c), abs(lo - prev_c)))
+    atr = sum(tr_list[:period]) / period
+    for i in range(period, len(tr_list)):
+        atr = (atr * (period - 1) + tr_list[i]) / period
+    return round(atr, 2)
 
 
 # ── 메인 ────────────────────────────────────────────────
@@ -175,7 +282,8 @@ def collect_eth_btc_ratio() -> dict:
 
 def main(market: str = "KRW-BTC"):
     ticker = api_get("/ticker", {"markets": market})[0]
-    daily = api_get("/candles/days", {"market": market, "count": "30"})
+    # 220일봉으로 EMA(200), ADX 등 장기 지표 지원
+    daily = api_get("/candles/days", {"market": market, "count": "220"})
     four_h = api_get("/candles/minutes/240", {"market": market, "count": "42"})
     ob = api_get("/orderbook", {"markets": market})[0]
     trades = api_get("/trades/ticks", {"market": market, "count": "100"})
@@ -192,6 +300,29 @@ def main(market: str = "KRW-BTC"):
     time.sleep(0.15)
     eth_btc = collect_eth_btc_ratio()
 
+    # ADX / ATR
+    adx_data = calc_adx(highs, lows, closes)
+    atr_val = calc_atr(highs, lows, closes)
+
+    # 4시간봉 지표 계산
+    four_h.reverse()  # 오래된 순 정렬
+    closes_4h = [c["trade_price"] for c in four_h]
+    highs_4h = [c["high_price"] for c in four_h]
+    lows_4h = [c["low_price"] for c in four_h]
+
+    # 일봉 요약 (raw 데이터 대신 최근 5일 OHLCV 요약만)
+    daily_summary = []
+    for c in daily[-5:]:
+        daily_summary.append({
+            "date": c.get("candle_date_time_kst", "")[:10],
+            "open": c["opening_price"],
+            "high": c["high_price"],
+            "low": c["low_price"],
+            "close": c["trade_price"],
+            "change_pct": round((c["trade_price"] - c["opening_price"]) / max(c["opening_price"], 1) * 100, 2),
+            "volume": round(c["candle_acc_trade_volume"], 2),
+        })
+
     snapshot = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S+09:00"),
         "market": market,
@@ -200,11 +331,22 @@ def main(market: str = "KRW-BTC"):
         "volume_24h": ticker["acc_trade_volume_24h"],
         "indicators": {
             "sma_20": round(sma(closes, 20), 2),
+            "sma_50": round(sma(closes, 50), 2) if len(closes) >= 50 else None,
+            "sma_200": round(sma(closes, 200), 2) if len(closes) >= 200 else None,
             "ema_10": round(ema(closes, 10), 2),
+            "ema_50": round(ema(closes, 50), 2) if len(closes) >= 50 else None,
+            "ema_200": round(ema(closes, 200), 2) if len(closes) >= 200 else None,
             "rsi_14": round(rsi(closes, 14), 2),
             "macd": macd(closes),
             "bollinger": bollinger(closes, 20),
             "stochastic": stochastic(highs, lows, closes, 14),
+            "adx": adx_data,
+            "atr": atr_val,
+        },
+        "indicators_4h": {
+            "rsi_14": round(rsi(closes_4h, 14), 2) if len(closes_4h) > 14 else None,
+            "macd": macd(closes_4h) if len(closes_4h) >= 26 else None,
+            "stochastic": stochastic(highs_4h, lows_4h, closes_4h, 14),
         },
         "orderbook": {
             "bid_total": ob["total_bid_size"],
@@ -213,8 +355,7 @@ def main(market: str = "KRW-BTC"):
         },
         "trade_pressure": {"buy_volume": buy_vol, "sell_volume": sell_vol},
         "eth_btc_analysis": eth_btc,
-        "candles_daily": daily,
-        "candles_4h": list(reversed(four_h)),
+        "daily_summary_5d": daily_summary,
     }
     print(json.dumps(snapshot, indent=2, ensure_ascii=False))
 

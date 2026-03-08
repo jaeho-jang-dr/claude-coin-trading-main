@@ -30,11 +30,19 @@ UPBIT_API = "https://api.upbit.com/v1"
 RATE_LIMIT_WAIT = 0.15  # Upbit API rate limit 대응
 
 
-def api_get(path: str, params: dict | None = None) -> dict | list:
+def api_get(path: str, params: dict | None = None, max_retries: int = 3) -> dict | list:
     url = f"{UPBIT_API}{path}"
     if params:
         url += "?" + "&".join(f"{k}={v}" for k, v in params.items())
-    r = requests.get(url, timeout=10)
+    for attempt in range(max_retries):
+        r = requests.get(url, timeout=10)
+        if r.status_code == 429:
+            wait = 2 ** attempt
+            print(f"[rate_limit] 429 received, retrying in {wait}s...", file=sys.stderr)
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        return r.json()
     r.raise_for_status()
     return r.json()
 
@@ -107,13 +115,17 @@ def analyze_orderbook(market: str) -> dict:
 
 
 def analyze_whale_trades(market: str) -> dict:
-    """#2 고래 거래 감지"""
+    """#2 고래 거래 감지 + CVD (Cumulative Volume Delta)"""
     trades = api_get("/trades/ticks", {"market": market, "count": "200"})
 
     buy_vol = sell_vol = 0.0
     buy_count = sell_count = 0
     large_trades = []
     whale_threshold_krw = 1_000_000  # 100만원
+
+    # CVD: 누적 체결 델타 (매수체결량 - 매도체결량)
+    cvd = 0.0
+    cvd_series = []
 
     for t in trades:
         vol = abs(t.get("trade_volume", 0))
@@ -124,9 +136,13 @@ def analyze_whale_trades(market: str) -> dict:
         if side == "BID":
             buy_vol += vol
             buy_count += 1
+            cvd += vol
         else:
             sell_vol += vol
             sell_count += 1
+            cvd -= vol
+
+        cvd_series.append(cvd)
 
         if krw >= whale_threshold_krw:
             large_trades.append({
@@ -142,6 +158,16 @@ def analyze_whale_trades(market: str) -> dict:
     whale_buy = sum(1 for t in large_trades if t["side"] == "BID")
     whale_sell = len(large_trades) - whale_buy
 
+    # CVD 추세 분석: 후반 50건 vs 전반 50건
+    cvd_trend = "neutral"
+    if len(cvd_series) >= 100:
+        first_half = cvd_series[49] - cvd_series[0]
+        second_half = cvd_series[-1] - cvd_series[49]
+        if second_half > first_half + total_vol * 0.01:
+            cvd_trend = "accumulating"  # 매수 가속
+        elif second_half < first_half - total_vol * 0.01:
+            cvd_trend = "distributing"  # 매도 가속
+
     return {
         "total_trades": len(trades),
         "buy_count": buy_count,
@@ -152,6 +178,8 @@ def analyze_whale_trades(market: str) -> dict:
         "trade_pressure": (
             "buy" if buy_ratio > 55 else "sell" if buy_ratio < 45 else "neutral"
         ),
+        "cvd": round(cvd, 8),
+        "cvd_trend": cvd_trend,
         "whale_trades_count": len(large_trades),
         "whale_buy": whale_buy,
         "whale_sell": whale_sell,
@@ -204,12 +232,32 @@ def analyze_multi_timeframe(market: str) -> dict:
                     "단기 과매수, 조정 가능"
                 )
 
+    # 멀티 타임프레임 추세 정렬 (Trend Alignment)
+    trends = [trend_d, trend_4h, trend_1h]
+    valid_trends = [t for t in trends if t != 0.0]
+    if len(valid_trends) >= 2:
+        bullish = sum(1 for t in valid_trends if t > 0)
+        bearish = sum(1 for t in valid_trends if t < 0)
+        if bullish == len(valid_trends):
+            trend_alignment = "all_bullish"
+        elif bearish == len(valid_trends):
+            trend_alignment = "all_bearish"
+        elif bullish > bearish:
+            trend_alignment = "mostly_bullish"
+        elif bearish > bullish:
+            trend_alignment = "mostly_bearish"
+        else:
+            trend_alignment = "mixed"
+    else:
+        trend_alignment = "insufficient_data"
+
     return {
         "timeframes": {
             "daily": {"rsi": rsi_d, "trend_pct": trend_d},
             "4h": {"rsi": rsi_4h, "trend_pct": trend_4h},
             "1h": {"rsi": rsi_1h, "trend_pct": trend_1h},
         },
+        "trend_alignment": trend_alignment,
         "divergence": divergence,
         "divergence_type": divergence_type,
     }
@@ -336,6 +384,17 @@ def compute_composite_score(
         components.append({"name": "whale_direction", "score": pts,
                            "detail": f"고래 매도 {ws}건 vs 매수 {wb}건"})
 
+    # 3.5) CVD 추세 (최대 +/-10)
+    cvd_trend = whale.get("cvd_trend", "neutral")
+    if cvd_trend == "accumulating":
+        score += 10
+        components.append({"name": "cvd_trend", "score": 10,
+                           "detail": "CVD 매수 가속 (숨겨진 매집)"})
+    elif cvd_trend == "distributing":
+        score -= 10
+        components.append({"name": "cvd_trend", "score": -10,
+                           "detail": "CVD 매도 가속 (숨겨진 분배)"})
+
     # 4) 다이버전스 (최대 +/-10)
     div_type = multi_tf.get("divergence_type")
     if div_type == "short_term_oversold":
@@ -346,6 +405,17 @@ def compute_composite_score(
         score -= 10
         components.append({"name": "tf_divergence", "score": -10,
                            "detail": "단기 과매수 다이버전스 (조정 가능)"})
+
+    # 4.5) 멀티TF 추세 정렬 (최대 +/-10)
+    alignment = multi_tf.get("trend_alignment", "mixed")
+    if alignment == "all_bullish":
+        score += 10
+        components.append({"name": "trend_alignment", "score": 10,
+                           "detail": "전 타임프레임 상승 정렬"})
+    elif alignment == "all_bearish":
+        score -= 10
+        components.append({"name": "trend_alignment", "score": -10,
+                           "detail": "전 타임프레임 하락 정렬"})
 
     # 5) 변동성 레짐 (최대 +/-10)
     regime = volatility.get("regime", "normal")
@@ -394,8 +464,8 @@ def compute_composite_score(
     return {
         "score": score,
         "interpretation": interpretation,
-        "max_possible": 85,
-        "min_possible": -85,
+        "max_possible": 100,
+        "min_possible": -100,
         "components": components,
     }
 

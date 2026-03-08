@@ -38,9 +38,35 @@ LOCK_FILE = PROJECT_DIR / "data" / "trading.lock"
 KST = timezone(timedelta(hours=9))
 
 
+LOCK_TIMEOUT_SECONDS = 120  # 2분 이상 된 락은 stale로 판단
+
+
 def acquire_lock():
-    """정규 매매 실행 중 락파일 생성"""
+    """정규 매매 실행 중 락파일 생성. stale lock 자동 해제."""
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    # stale lock 검사: 타임아웃 초과 또는 프로세스 사망 시 강제 해제
+    if LOCK_FILE.exists():
+        try:
+            data = json.loads(LOCK_FILE.read_text())
+            lock_time = datetime.fromisoformat(data["timestamp"])
+            age = (datetime.now(KST) - lock_time).total_seconds()
+            lock_pid = data.get("pid", 0)
+            # 프로세스 생존 확인
+            pid_alive = False
+            try:
+                os.kill(lock_pid, 0)
+                pid_alive = True
+            except (OSError, ProcessLookupError):
+                pid_alive = False
+            if age > LOCK_TIMEOUT_SECONDS or not pid_alive:
+                print(f"[lock] stale lock 제거 (age={age:.0f}s, pid={lock_pid}, alive={pid_alive})", file=sys.stderr)
+                LOCK_FILE.unlink(missing_ok=True)
+            else:
+                raise RuntimeError(f"다른 매매 프로세스 실행 중 (pid={lock_pid}, age={age:.0f}s)")
+        except (json.JSONDecodeError, KeyError):
+            LOCK_FILE.unlink(missing_ok=True)
+
     LOCK_FILE.write_text(json.dumps({
         "process": "execute_trade",
         "pid": os.getpid(),
@@ -56,7 +82,7 @@ def release_lock():
             if data.get("pid") == os.getpid():
                 LOCK_FILE.unlink(missing_ok=True)
     except Exception:
-        pass
+        LOCK_FILE.unlink(missing_ok=True)
 
 
 def make_auth_header(query_string: str) -> dict:
@@ -111,7 +137,19 @@ def execute(side: str, market: str, amount: str):
         }
 
     # 4) 주문 실행 (락파일로 단타 봇과 동시 실행 방지)
-    acquire_lock()
+    try:
+        acquire_lock()
+    except RuntimeError as e:
+        return {
+            "success": False,
+            "dry_run": False,
+            "side": side,
+            "market": market,
+            "amount": amount,
+            "error": str(e),
+            "timestamp": ts,
+        }
+
     try:
         body = {"market": market, "side": side}
         if side == "bid":
@@ -127,6 +165,13 @@ def execute(side: str, market: str, amount: str):
         r = requests.post(f"{UPBIT_API}/orders", json=body, headers=headers, timeout=10)
         response = r.json()
 
+        # 잔고 부족, 최소 주문 금액 등 API 에러 상세 처리
+        error_msg = None
+        if not r.ok:
+            err_name = response.get("error", {}).get("name", "")
+            err_msg = response.get("error", {}).get("message", "")
+            error_msg = f"{err_name}: {err_msg}" if err_name else json.dumps(response, ensure_ascii=False)
+
         return {
             "success": r.ok,
             "dry_run": False,
@@ -134,7 +179,17 @@ def execute(side: str, market: str, amount: str):
             "market": market,
             "amount": amount,
             "response": response,
-            "error": None if r.ok else json.dumps(response, ensure_ascii=False),
+            "error": error_msg,
+            "timestamp": ts,
+        }
+    except requests.exceptions.RequestException as e:
+        return {
+            "success": False,
+            "dry_run": False,
+            "side": side,
+            "market": market,
+            "amount": amount,
+            "error": f"주문 요청 실패: {e}",
             "timestamp": ts,
         }
     finally:

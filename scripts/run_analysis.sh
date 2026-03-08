@@ -61,6 +61,10 @@ python3 scripts/get_portfolio.py > "${SNAPSHOT_DIR}/portfolio.json" 2>/dev/null 
 python3 scripts/collect_ai_signal.py > "${SNAPSHOT_DIR}/ai_signal.json" 2>/dev/null \
   || echo '{"error":"ai_signal 수집 실패"}' > "${SNAPSHOT_DIR}/ai_signal.json"
 
+# 7. 온체인 데이터 수집 (Binance 선물 + mempool)
+python3 scripts/collect_onchain_data.py > "${SNAPSHOT_DIR}/onchain.json" 2>/dev/null \
+  || echo '{"error":"onchain 수집 실패"}' > "${SNAPSHOT_DIR}/onchain.json"
+
 echo "[$(date)] 데이터 수집 완료. 프롬프트 생성 중..." >&2
 
 # 데이터 로드
@@ -70,6 +74,7 @@ FEAR_GREED=$(cat "${SNAPSHOT_DIR}/fear_greed.json")
 NEWS=$(cat "${SNAPSHOT_DIR}/news.json")
 PORTFOLIO=$(cat "${SNAPSHOT_DIR}/portfolio.json")
 AI_SIGNAL=$(cat "${SNAPSHOT_DIR}/ai_signal.json")
+ONCHAIN=$(cat "${SNAPSHOT_DIR}/onchain.json")
 
 # Supabase에서 과거 결정 조회 (최근 10건) - PostgREST API 사용
 PAST_DECISIONS="[]"
@@ -188,6 +193,16 @@ ${PORTFOLIO}
 [AI 복합 시그널]
 ═══════════════════════════════════════════
 ${AI_SIGNAL}
+
+═══════════════════════════════════════════
+[온체인 데이터 (선물 시장 + 네트워크)]
+═══════════════════════════════════════════
+${ONCHAIN}
+
+펀딩레이트/롱숏비율은 역발상 지표로 활용:
+- 롱 과열(펀딩레이트 높음) → 하락 조정 가능성 (매수 주의)
+- 숏 과열(펀딩레이트 음수) → 숏스퀴즈 가능성 (매수 기회)
+- OI 급증 + 가격 하락 = 숏 포지션 증가 → 반등 가능
 
 ═══════════════════════════════════════════
 [과거 의사결정 (최근 10건)]

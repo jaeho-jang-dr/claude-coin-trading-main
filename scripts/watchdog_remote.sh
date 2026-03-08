@@ -67,9 +67,28 @@ get_rc_status() {
     fi
 }
 
+# ─── rating 프롬프트 자동 dismiss ───
+# 세션 종료 후 "1: Bad  2: Fine  3: Good  0: Dismiss" 프롬프트가 뜨면
+# 입력 대기 상태로 RC가 타임아웃된다. 0(Dismiss)을 자동 전송하여 해소.
+dismiss_rating_prompt() {
+    local screen
+    screen=$(tmux capture-pane -t "$TMUX_SESSION:$TMUX_WINDOW" -p 2>/dev/null)
+    if echo "$screen" | grep -q "1: Bad.*2: Fine.*3: Good.*0: Dismiss"; then
+        tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" '0' Enter
+        sleep 2
+        tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" C-u
+        log "OK: Rating prompt auto-dismissed"
+        return 0
+    fi
+    return 1
+}
+
 # ─── 경량 킵얼라이브 ───
 # /rc → 자동완성/메뉴 뜨면 Escape → 세션에 영향 없이 bridge traffic만 발생
 send_keepalive() {
+    # rating 프롬프트 먼저 해소
+    dismiss_rating_prompt
+
     # 메뉴가 떠있으면 먼저 닫기
     local pane_check
     pane_check=$(tmux capture-pane -t "$TMUX_SESSION:$TMUX_WINDOW" -p -S -5 2>/dev/null)
@@ -78,9 +97,8 @@ send_keepalive() {
         sleep 1
     fi
 
-    # /rc 입력 → bridge 통신 발생 → 즉시 Escape로 취소
-    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" "/rc" Enter
-    sleep 3
+    # Escape 키만 전송 → bridge 통신 발생, 세션 오염 없음
+    # 아무 메뉴도 없으면 Escape는 무시됨 (no-op)
     tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Escape
     sleep 1
 
@@ -91,41 +109,44 @@ send_keepalive() {
 graceful_reconnect() {
     log "ACTION: Graceful reconnect (disconnect → /rc)"
 
+    # 0) rating 프롬프트 먼저 해소
+    dismiss_rating_prompt
+
     # 1) stale bridge 파일 삭제
     rm -f "$BRIDGE_FILE"
 
-    # 2) /remote-control 실행하여 Disconnect 메뉴 접근
-    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Escape
-    sleep 1
-    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" "/remote-control" Enter
+    # 2) 무의미한 메뉴 조작 대신 안전한 탈출 시도
+    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" C-c
+    sleep 2
+    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" C-d
+    sleep 2
+    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" "/exit" Enter
     sleep 5
 
-    # 3) Disconnect 선택 (메뉴의 첫 번째 항목)
-    local pane_check
-    pane_check=$(tmux capture-pane -t "$TMUX_SESSION:$TMUX_WINDOW" -p -S -10 2>/dev/null)
-    if echo "$pane_check" | grep -q "Disconnect"; then
-        # Disconnect가 보이면 선택 (첫 번째 항목이므로 Up → Enter)
-        tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Up Up Enter
-        sleep 3
-    else
-        # 메뉴가 안 뜨면 Escape
-        tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Escape
-        sleep 1
+    # 3) 쉘 복귀 성공 여부 판단
+    local post_exit
+    post_exit=$(tmux capture-pane -t "$TMUX_SESSION:$TMUX_WINDOW" -p -S -3 2>/dev/null)
+    if ! echo "$post_exit" | grep -qE '(\$|%)\s*$|drj00@'; then
+        log "WARN: Graceful reconnect failed to exit to shell"
+        return 1
     fi
 
-    # 4) 다시 /rc로 새 연결
+    # 4) 터미널 청소 후 재실행
+    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" C-u C-l
+    sleep 1
+    
+    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" "unset CLAUDECODE && claude --dangerously-skip-permissions" Enter
+    sleep 20
+
+    # 5) 다시 /rc로 새 연결
     tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" "/rc" Enter
     sleep 12
 
     # 자동완성 메뉴 대응
-    local post_rc
-    post_rc=$(tmux capture-pane -t "$TMUX_SESSION:$TMUX_WINDOW" -p -S -10 2>/dev/null)
-    if echo "$post_rc" | grep -q "remote-control\|/rc"; then
-        tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Enter
-        sleep 8
-    fi
+    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Enter
+    sleep 8
 
-    # 5) 결과 확인
+    # 6) 결과 확인
     local new_status
     new_status=$(get_rc_status)
     local new_url
@@ -153,28 +174,34 @@ restart_claude_with_rc() {
     local reason="$1"
     log "ACTION: Full restart - last resort ($reason)"
 
-    # 1) 기존 Claude 종료
-    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Escape
-    sleep 1
-    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" "/exit" Enter
-    sleep 8
+    # 0) rating 프롬프트 먼저 해소
+    dismiss_rating_prompt
 
-    # 종료 확인
-    local post_exit
-    post_exit=$(tmux capture-pane -t "$TMUX_SESSION:$TMUX_WINDOW" -p -S -3 2>/dev/null)
-    if ! echo "$post_exit" | grep -qE '(\$|%)\s*$|drj00@'; then
-        tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" C-c
-        sleep 3
+    # 1) 확실한 프로세스 강제 종료 (kill -9)
+    local PANE_PID
+    PANE_PID=$(tmux list-panes -t "$TMUX_SESSION:$TMUX_WINDOW" -F '#{pane_pid}' 2>/dev/null)
+    if [ -n "$PANE_PID" ]; then
+        local CLAUDE_RUNNING
+        CLAUDE_RUNNING=$(pgrep -P "$PANE_PID" -f "claude" 2>/dev/null)
+        if [ -n "$CLAUDE_RUNNING" ]; then
+            kill -9 $CLAUDE_RUNNING 2>/dev/null
+            log "OK: Killed stuck Claude process ($CLAUDE_RUNNING)"
+            sleep 3
+        fi
     fi
 
     # 2) stale bridge 파일 삭제
     rm -f "$BRIDGE_FILE"
 
-    # 3) 새 Claude 시작
+    # 3) 터미널 프롬프트 완벽 초기화 (C-c: 인터럽트, C-u: 줄지우기, C-l: 화면지우기)
+    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" C-c C-u C-l
+    sleep 2
+
+    # 4) 새 Claude 시작
     tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" "unset CLAUDECODE && claude --dangerously-skip-permissions" Enter
     sleep 20
 
-    # 4) /rc 활성화
+    # 5) /rc 활성화
     tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" "/rc" Enter
     sleep 12
 
@@ -182,7 +209,7 @@ restart_claude_with_rc() {
     tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Enter
     sleep 8
 
-    # 5) 결과 확인
+    # 6) 결과 확인
     local new_status
     new_status=$(get_rc_status)
     local new_url
@@ -206,6 +233,11 @@ Status: $new_status
 # =============================================================================
 # 메인 로직
 # =============================================================================
+
+# --- 0. rating 프롬프트 체크 (RC 블록 방지) ---
+if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+    dismiss_rating_prompt
+fi
 
 # --- 1. tmux 세션 확인 ---
 if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then

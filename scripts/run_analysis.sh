@@ -91,6 +91,26 @@ if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
     2>/dev/null || echo "[]")
 fi
 
+# 초단타(스캘프) 최근 성과 조회 — 크로스 학습용
+SCALP_PERFORMANCE="[]"
+if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
+  SCALP_PERFORMANCE=$(curl -s \
+    "${SUPABASE_URL}/rest/v1/scalp_trades?select=strategy,side,amount,pnl,price,created_at&order=created_at.desc&limit=20" \
+    -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+    -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+    2>/dev/null || echo "[]")
+fi
+
+# 고래 감지 최근 동향 — 크로스 학습용
+WHALE_ACTIVITY="[]"
+if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
+  WHALE_ACTIVITY=$(curl -s \
+    "${SUPABASE_URL}/rest/v1/whale_detections?select=side,amount,price,ratio,created_at&order=created_at.desc&limit=10" \
+    -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+    -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+    2>/dev/null || echo "[]")
+fi
+
 # ETH/BTC 비율 및 도미넌스 데이터 수집
 ETH_DATA=$(python3 -c "
 import requests, json, statistics
@@ -184,6 +204,24 @@ ${PERFORMANCE_REVIEW}
 - 매수 결정: 양수 = 수익, 음수 = 손실
 - 매도 결정: 양수 = 잘 팔았음(가격 하락), 음수 = 너무 일찍 팔았음(가격 상승)
 이전 결정의 정확도를 분석하고, 같은 실수를 반복하지 마세요.
+
+═══════════════════════════════════════════
+[초단타(스캘프) 최근 거래 성과]
+═══════════════════════════════════════════
+${SCALP_PERFORMANCE}
+
+위 데이터는 실시간 초단타 봇의 최근 거래 기록입니다.
+- 고래 추종, 급변동 리바운드, 뉴스 반응 3가지 전략을 사용합니다.
+- 초단타 성과가 좋은 전략 방향(매수/매도)은 단타 판단의 보조 참고 자료로 활용하세요.
+- 초단타가 연속 손실 중이면 시장 변동성이 높아 단타도 보수적으로 접근하세요.
+
+═══════════════════════════════════════════
+[고래 거래 최근 동향]
+═══════════════════════════════════════════
+${WHALE_ACTIVITY}
+
+고래(3000만원+ 거래)의 최근 방향성을 파악하세요.
+매수/매도 비율이 편중되면 시장 방향성 판단에 참고하세요.
 
 ═══════════════════════════════════════════
 [사용자 피드백 (미반영)]

@@ -166,17 +166,8 @@ def get_current_price(market: str = MARKET) -> float:
 
 
 def sound_alert(message: str, urgent: bool = False):
-    """macOS 음성 알림 (say 명령 사용)"""
-    import subprocess
-    try:
-        rate = 200 if urgent else 180
-        # 긴급 시 시스템 사운드 먼저 재생
-        if urgent:
-            subprocess.Popen(["afplay", "/System/Library/Sounds/Glass.aiff"])
-            time.sleep(0.5)
-        subprocess.Popen(["say", "-v", "Yuna", "-r", str(rate), message])
-    except Exception:
-        pass
+    """음성 알림 비활성화됨 (2026-03-08)"""
+    return
 
 
 # ── Supabase REST API 기록 ────────────────────────────

@@ -1,21 +1,33 @@
 #!/bin/bash
 # =============================================================================
-# Remote Control Watchdog
-# Claude Code의 remote-control 상태를 감시하고 자동 재연결
-# bridge-pointer.json 존재 여부로 리모트 상태를 정확히 판단
-# LaunchAgent로 3분마다 실행
+# Remote Control Watchdog v3
+#
+# 3분마다 실행 (LaunchAgent: com.claude.watchdog-remote)
+#
+# 설계 철학: "치료보다 예방"
+#   - 5분마다 경량 킵얼라이브 → 10분 타임아웃에 절대 걸리지 않게 함
+#   - reconnecting 발생 시에도 우아한 복구 우선 (재시작은 최후 수단)
+#
+# 복구 우선순위:
+#   1) active → 5분마다 킵얼라이브 (Escape로 경량 ping)
+#   2) reconnecting → disconnect → /rc 재연결 (Claude 유지)
+#   3) reconnecting 재연결 실패 → Claude 완전 재시작 (최후 수단)
+#   4) Claude 없음 → 새로 시작
+#   5) tmux 없음 → startup.sh
 # =============================================================================
 
 PROJECT_DIR="/Users/drj00/workspace/blockchain"
 REMOTE_URL_FILE="$PROJECT_DIR/data/remote_url.txt"
 LOG_FILE="$PROJECT_DIR/logs/watchdog.log"
+KEEPALIVE_FILE="$PROJECT_DIR/data/.rc_keepalive_ts"
 BRIDGE_FILE="$HOME/.claude/projects/-Users-drj00-workspace-blockchain/bridge-pointer.json"
 TMUX_SESSION="blockchain"
 TMUX_WINDOW="claude"
+KEEPALIVE_INTERVAL=300   # 5분 (10분 타임아웃의 절반 → 안전 마진 충분)
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
-mkdir -p "$(dirname "$LOG_FILE")"
+mkdir -p "$(dirname "$LOG_FILE")" "$PROJECT_DIR/data"
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
@@ -34,103 +46,251 @@ extract_url() {
     local pane_output
     pane_output=$(tmux capture-pane -t "$TMUX_SESSION:$TMUX_WINDOW" -p -S -30 2>/dev/null)
     local url
-    # bridge=env_ 형식 (최신)
-    url=$(echo "$pane_output" | grep -o 'https://claude\.ai/code?bridge=env_[A-Za-z0-9_]*' | tail -1)
+    url=$(echo "$pane_output" | grep -o 'https://claude\.ai/code/session_[A-Za-z0-9]*' | tail -1)
     if [ -z "$url" ]; then
-        # session_ 형식 (구형)
-        url=$(echo "$pane_output" | grep -o 'https://claude\.ai/code/session_[A-Za-z0-9]*' | tail -1)
+        url=$(echo "$pane_output" | grep -o 'https://claude\.ai/code?bridge=env_[A-Za-z0-9_]*' | tail -1)
     fi
     echo "$url"
 }
 
-start_claude_and_rc() {
-    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" "unset CLAUDECODE && claude --dangerously-skip-permissions" Enter
-    sleep 20
-    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" "/rc" Enter
-    sleep 10
-    local new_url
-    new_url=$(extract_url)
-    if [ -n "$new_url" ]; then
-        echo "$new_url" > "$REMOTE_URL_FILE"
-        tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Enter
-        send_telegram "Watchdog: $1
-$new_url"
-        log "OK: $1. URL: $new_url"
+get_rc_status() {
+    # tmux 화면 전체에서 Remote Control 상태를 읽는다
+    local screen
+    screen=$(tmux capture-pane -t "$TMUX_SESSION:$TMUX_WINDOW" -p 2>/dev/null)
+
+    if echo "$screen" | grep -q "Remote Control active"; then
+        echo "active"
+    elif echo "$screen" | grep -q "reconnecting"; then
+        echo "reconnecting"
     else
-        log "ERROR: Could not get remote URL after $1"
+        echo "none"
     fi
 }
 
-# --- 1. tmux 세션 존재 확인 ---
+# ─── 경량 킵얼라이브 ───
+# /rc → 자동완성/메뉴 뜨면 Escape → 세션에 영향 없이 bridge traffic만 발생
+send_keepalive() {
+    # 메뉴가 떠있으면 먼저 닫기
+    local pane_check
+    pane_check=$(tmux capture-pane -t "$TMUX_SESSION:$TMUX_WINDOW" -p -S -5 2>/dev/null)
+    if echo "$pane_check" | grep -q "Disconnect\|Show QR\|Enter to select"; then
+        tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Escape
+        sleep 1
+    fi
+
+    # /rc 입력 → bridge 통신 발생 → 즉시 Escape로 취소
+    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" "/rc" Enter
+    sleep 3
+    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Escape
+    sleep 1
+
+    echo "$(date +%s)" > "$KEEPALIVE_FILE"
+}
+
+# ─── 우아한 복구: reconnecting → disconnect → 재연결 (Claude 유지) ───
+graceful_reconnect() {
+    log "ACTION: Graceful reconnect (disconnect → /rc)"
+
+    # 1) stale bridge 파일 삭제
+    rm -f "$BRIDGE_FILE"
+
+    # 2) /remote-control 실행하여 Disconnect 메뉴 접근
+    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Escape
+    sleep 1
+    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" "/remote-control" Enter
+    sleep 5
+
+    # 3) Disconnect 선택 (메뉴의 첫 번째 항목)
+    local pane_check
+    pane_check=$(tmux capture-pane -t "$TMUX_SESSION:$TMUX_WINDOW" -p -S -10 2>/dev/null)
+    if echo "$pane_check" | grep -q "Disconnect"; then
+        # Disconnect가 보이면 선택 (첫 번째 항목이므로 Up → Enter)
+        tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Up Up Enter
+        sleep 3
+    else
+        # 메뉴가 안 뜨면 Escape
+        tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Escape
+        sleep 1
+    fi
+
+    # 4) 다시 /rc로 새 연결
+    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" "/rc" Enter
+    sleep 12
+
+    # 자동완성 메뉴 대응
+    local post_rc
+    post_rc=$(tmux capture-pane -t "$TMUX_SESSION:$TMUX_WINDOW" -p -S -10 2>/dev/null)
+    if echo "$post_rc" | grep -q "remote-control\|/rc"; then
+        tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Enter
+        sleep 8
+    fi
+
+    # 5) 결과 확인
+    local new_status
+    new_status=$(get_rc_status)
+    local new_url
+    new_url=$(extract_url)
+
+    if [ "$new_status" = "active" ] && [ -n "$new_url" ]; then
+        echo "$new_url" > "$REMOTE_URL_FILE"
+        echo "$(date +%s)" > "$KEEPALIVE_FILE"
+        log "OK: Graceful reconnect succeeded. URL: $new_url"
+        local old_url
+        old_url=$(cat "$REMOTE_URL_FILE" 2>/dev/null)
+        if [ "$new_url" != "$old_url" ]; then
+            send_telegram "🔄 Watchdog: 우아한 재연결 성공
+$new_url"
+        fi
+        return 0
+    fi
+
+    log "WARN: Graceful reconnect failed (status: $new_status)"
+    return 1
+}
+
+# ─── 최후 수단: Claude 완전 재시작 ───
+restart_claude_with_rc() {
+    local reason="$1"
+    log "ACTION: Full restart - last resort ($reason)"
+
+    # 1) 기존 Claude 종료
+    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Escape
+    sleep 1
+    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" "/exit" Enter
+    sleep 8
+
+    # 종료 확인
+    local post_exit
+    post_exit=$(tmux capture-pane -t "$TMUX_SESSION:$TMUX_WINDOW" -p -S -3 2>/dev/null)
+    if ! echo "$post_exit" | grep -qE '(\$|%)\s*$|drj00@'; then
+        tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" C-c
+        sleep 3
+    fi
+
+    # 2) stale bridge 파일 삭제
+    rm -f "$BRIDGE_FILE"
+
+    # 3) 새 Claude 시작
+    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" "unset CLAUDECODE && claude --dangerously-skip-permissions" Enter
+    sleep 20
+
+    # 4) /rc 활성화
+    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" "/rc" Enter
+    sleep 12
+
+    # 자동완성 대응
+    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Enter
+    sleep 8
+
+    # 5) 결과 확인
+    local new_status
+    new_status=$(get_rc_status)
+    local new_url
+    new_url=$(extract_url)
+
+    if [ "$new_status" = "active" ] && [ -n "$new_url" ]; then
+        echo "$new_url" > "$REMOTE_URL_FILE"
+        echo "$(date +%s)" > "$KEEPALIVE_FILE"
+        log "OK: Full restart succeeded. URL: $new_url"
+        send_telegram "🔄 Watchdog: 재시작 완료 ($reason)
+Remote Control active
+$new_url"
+    else
+        log "ERROR: Full restart failed. Status: $new_status"
+        send_telegram "⚠️ Watchdog: 재시작 실패 ($reason)
+Status: $new_status
+수동 확인 필요"
+    fi
+}
+
+# =============================================================================
+# 메인 로직
+# =============================================================================
+
+# --- 1. tmux 세션 확인 ---
 if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     log "WARN: tmux session not found. Running startup.sh..."
     bash "$PROJECT_DIR/scripts/startup.sh"
     exit 0
 fi
 
-# --- 2. claude 윈도우 존재 확인 ---
+# --- 2. claude 윈도우 확인 ---
 if ! tmux list-windows -t "$TMUX_SESSION" -F '#{window_name}' 2>/dev/null | grep -q "^${TMUX_WINDOW}"; then
     log "WARN: tmux window '$TMUX_WINDOW' not found. Recreating..."
     tmux new-window -t "$TMUX_SESSION" -n "$TMUX_WINDOW" -c "$PROJECT_DIR"
     sleep 1
-    start_claude_and_rc "Claude window recreated"
+    restart_claude_with_rc "Claude window recreated"
     exit 0
 fi
 
-# --- 3. Claude 프로세스 생존 확인 ---
+# --- 3. Claude 프로세스 확인 ---
 PANE_PID=$(tmux list-panes -t "$TMUX_SESSION:$TMUX_WINDOW" -F '#{pane_pid}' 2>/dev/null)
 if [ -n "$PANE_PID" ]; then
     CLAUDE_RUNNING=$(pgrep -P "$PANE_PID" -f "claude" 2>/dev/null)
     if [ -z "$CLAUDE_RUNNING" ]; then
-        log "WARN: Claude not running in pane. Restarting..."
-        tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" C-c
-        sleep 2
-        start_claude_and_rc "Claude restarted"
+        log "WARN: Claude not running. Starting..."
+        restart_claude_with_rc "Claude process not found"
         exit 0
     fi
 fi
 
-# --- 4. Remote Control 활성 상태 확인 (bridge-pointer.json) ---
-if [ -f "$BRIDGE_FILE" ]; then
-    log "OK: Remote active"
-    exit 0
-fi
+# --- 4. Remote Control 상태 판단 ---
+RC_STATUS=$(get_rc_status)
 
-# bridge-pointer.json 없음 = 리모트 꺼짐
-log "WARN: Remote inactive (no bridge-pointer.json). Reconnecting..."
+case "$RC_STATUS" in
+    active)
+        # ✅ 정상 — 킵얼라이브만 (5분 간격)
+        LAST_PING=0
+        [ -f "$KEEPALIVE_FILE" ] && LAST_PING=$(cat "$KEEPALIVE_FILE" 2>/dev/null)
+        NOW=$(date +%s)
+        ELAPSED=$(( NOW - LAST_PING ))
 
-# /rc 메뉴가 이미 떠있으면 Escape로 빠져나옴
-PANE_OUTPUT=$(tmux capture-pane -t "$TMUX_SESSION:$TMUX_WINDOW" -p -S -10 2>/dev/null)
-if echo "$PANE_OUTPUT" | grep -q "Remote Control\|Disconnect\|Show QR"; then
-    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Escape
-    sleep 2
-fi
-
-# /rc 실행
-tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" "/rc" Enter
-sleep 10
-
-# URL 추출
-NEW_URL=$(extract_url)
-if [ -n "$NEW_URL" ]; then
-    OLD_URL=$(cat "$REMOTE_URL_FILE" 2>/dev/null)
-    echo "$NEW_URL" > "$REMOTE_URL_FILE"
-    # Continue 선택
-    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Enter
-    sleep 2
-    if [ -f "$BRIDGE_FILE" ]; then
-        log "OK: Remote reconnected. URL: $NEW_URL"
-        if [ "$NEW_URL" != "$OLD_URL" ]; then
-            send_telegram "Watchdog: Remote reconnected
-$NEW_URL"
+        if [ "$ELAPSED" -ge "$KEEPALIVE_INTERVAL" ]; then
+            send_keepalive
+            log "OK: Remote active (keepalive sent)"
+        else
+            log "OK: Remote active (next keepalive in $(( KEEPALIVE_INTERVAL - ELAPSED ))s)"
         fi
-    else
-        log "WARN: /rc done but bridge-pointer.json still missing"
-    fi
-else
-    PANE_NOW=$(tmux capture-pane -t "$TMUX_SESSION:$TMUX_WINDOW" -p -S -5 2>/dev/null)
-    log "ERROR: Could not extract URL. Screen: $(echo "$PANE_NOW" | tr '\n' '|')"
-    if echo "$PANE_NOW" | grep -q "Continue\|Remote Control"; then
+        ;;
+
+    reconnecting)
+        # ⚠️ 장애 — 우아한 복구 시도 → 실패 시에만 재시작
+        log "WARN: Remote Control reconnecting. Trying graceful reconnect..."
+
+        if graceful_reconnect; then
+            log "OK: Recovered from reconnecting without restart"
+        else
+            log "WARN: Graceful reconnect failed. Full restart as last resort."
+            restart_claude_with_rc "reconnecting → graceful failed"
+        fi
+        ;;
+
+    none)
+        # Remote Control 없음 → /rc 시도
+        log "WARN: No Remote Control. Trying /rc..."
+
+        tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" "/rc" Enter
+        sleep 12
         tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Enter
-    fi
-fi
+        sleep 5
+
+        NEW_STATUS=$(get_rc_status)
+        if [ "$NEW_STATUS" = "active" ]; then
+            NEW_URL=$(extract_url)
+            [ -n "$NEW_URL" ] && echo "$NEW_URL" > "$REMOTE_URL_FILE"
+            echo "$(date +%s)" > "$KEEPALIVE_FILE"
+            log "OK: Remote Control activated. URL: $NEW_URL"
+            send_telegram "✅ Watchdog: Remote Control 활성화
+$NEW_URL"
+        elif [ "$NEW_STATUS" = "reconnecting" ]; then
+            log "WARN: /rc → reconnecting. Trying graceful reconnect..."
+            if graceful_reconnect; then
+                log "OK: Recovered via graceful reconnect"
+            else
+                restart_claude_with_rc "/rc → reconnecting → graceful failed"
+            fi
+        else
+            restart_claude_with_rc "Remote Control failed to activate"
+        fi
+        ;;
+esac

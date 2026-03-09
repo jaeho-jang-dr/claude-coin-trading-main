@@ -3,8 +3,11 @@
 # 전체 데이터 수집 + 프롬프트 생성 파이프라인
 # cron에서 claude -p에 전달할 프롬프트를 stdout으로 출력한다.
 #
-# 사용법 (cron):
+# 사용법 (cron — LLM 프롬프트 모드):
 #   bash scripts/run_analysis.sh 2>/dev/null | claude -p --dangerously-skip-permissions
+#
+# 사용법 (에이전트 모드 — Python 에이전트가 직접 판단):
+#   bash scripts/run_analysis.sh --agent
 #
 # 사용법 (수동 분석):
 #   bash scripts/run_analysis.sh
@@ -14,6 +17,11 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_DIR"
+
+# --agent 모드: 에이전트 파이프라인으로 위임
+if [ "${1:-}" = "--agent" ]; then
+  exec bash scripts/run_agents.sh
+fi
 
 # .env 로드
 if [ -f .env ]; then
@@ -65,7 +73,21 @@ python3 scripts/collect_ai_signal.py > "${SNAPSHOT_DIR}/ai_signal.json" 2>/dev/n
 python3 scripts/collect_onchain_data.py > "${SNAPSHOT_DIR}/onchain.json" 2>/dev/null \
   || echo '{"error":"onchain 수집 실패"}' > "${SNAPSHOT_DIR}/onchain.json"
 
-echo "[$(date)] 데이터 수집 완료. 프롬프트 생성 중..." >&2
+# 8. 고래 추적 (mempool.space — 블록체인 대규모 이동, 무료)
+python3 scripts/whale_tracker.py > "${SNAPSHOT_DIR}/whale_tracker.json" 2>/dev/null \
+  || echo '{"error":"whale_tracker 수집 실패"}' > "${SNAPSHOT_DIR}/whale_tracker.json"
+
+# 9. 바이낸스 심리 지표 + 김치 프리미엄 (무료, 키 불필요)
+python3 scripts/binance_sentiment.py > "${SNAPSHOT_DIR}/binance_sentiment.json" 2>/dev/null \
+  || echo '{"error":"binance_sentiment 수집 실패"}' > "${SNAPSHOT_DIR}/binance_sentiment.json"
+
+echo "[$(date)] 데이터 수집 완료. 외부 시그널 종합 중..." >&2
+
+# 10. 외부 지표 종합 점수 산출 (Data Fusion)
+python3 scripts/calculate_external_signal.py "${SNAPSHOT_DIR}" > "${SNAPSHOT_DIR}/external_signal.json" 2>/dev/null \
+  || echo '{"error":"external_signal 산출 실패"}' > "${SNAPSHOT_DIR}/external_signal.json"
+
+echo "[$(date)] 프롬프트 생성 중..." >&2
 
 # 데이터 로드
 STRATEGY=$(cat strategy.md)
@@ -75,6 +97,9 @@ NEWS=$(cat "${SNAPSHOT_DIR}/news.json")
 PORTFOLIO=$(cat "${SNAPSHOT_DIR}/portfolio.json")
 AI_SIGNAL=$(cat "${SNAPSHOT_DIR}/ai_signal.json")
 ONCHAIN=$(cat "${SNAPSHOT_DIR}/onchain.json")
+WHALE_TRACKER=$(cat "${SNAPSHOT_DIR}/whale_tracker.json")
+BINANCE_SENTIMENT=$(cat "${SNAPSHOT_DIR}/binance_sentiment.json")
+EXTERNAL_SIGNAL=$(cat "${SNAPSHOT_DIR}/external_signal.json")
 
 # Supabase에서 과거 결정 조회 (최근 10건) - PostgREST API 사용
 PAST_DECISIONS="[]"
@@ -114,6 +139,12 @@ if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
     -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
     -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
     2>/dev/null || echo "[]")
+fi
+
+# 로컬 피드백 편향치 (사용자 개입)
+USER_BIAS_STATE="{}"
+if [ -f data/orchestrator_state.json ]; then
+  USER_BIAS_STATE=$(cat data/orchestrator_state.json 2>/dev/null || echo "{}")
 fi
 
 # ETH/BTC 비율 및 도미넌스 데이터 수집
@@ -205,6 +236,32 @@ ${ONCHAIN}
 - OI 급증 + 가격 하락 = 숏 포지션 증가 → 반등 가능
 
 ═══════════════════════════════════════════
+[고래 추적 — 블록체인 대규모 BTC 이동]
+═══════════════════════════════════════════
+${WHALE_TRACKER}
+주의: 고래 데이터는 단독 매매 신호로 사용하지 마세요.
+거래소 순유입(bearish) + 다른 약세 지표 겹침 시에만 매도 가중치를 부여하세요.
+거래소 순유출(bullish) + 다른 강세 지표 겹침 시에만 매수 가중치를 부여하세요.
+
+═══════════════════════════════════════════
+[바이낸스 파생상품 심리 + 김치 프리미엄]
+═══════════════════════════════════════════
+${BINANCE_SENTIMENT}
+해석 가이드:
+- 롱/숏 비율 1.5+ & 펀딩비 양수 = 롱 과밀 → 조정 경고
+- 롱/숏 비율 0.7- & 펀딩비 음수 = 숏 과밀 → 숏 스퀴즈(반등) 가능
+- 김치 프리미엄 5%+ = 국내 FOMO → 과열 경고
+- 김치 프리미엄 -3%  = 디스카운트 → 매수 기회 가능
+
+═══════════════════════════════════════════
+[★ 외부 지표 종합 시그널 (Data Fusion)]
+═══════════════════════════════════════════
+${EXTERNAL_SIGNAL}
+★ strategy_bonus 값을 매수 점수에 직접 가산하세요.
+★ fusion.signal이 strong_buy/strong_sell이면 해당 방향 가중치를 강화하세요.
+★ fusion.signal이 mixed이면 관망 우선 고려하세요.
+
+═══════════════════════════════════════════
 [과거 의사결정 (최근 10건)]
 ═══════════════════════════════════════════
 ${PAST_DECISIONS}
@@ -244,6 +301,11 @@ ${WHALE_ACTIVITY}
 ${FEEDBACK}
 
 ═══════════════════════════════════════════
+[사용자 수동 피드백 상태 (Bias)]
+═══════════════════════════════════════════
+${USER_BIAS_STATE}
+
+═══════════════════════════════════════════
 [현재 시각]
 ═══════════════════════════════════════════
 $(date '+%Y-%m-%d %H:%M:%S KST')
@@ -269,7 +331,14 @@ $(date '+%Y-%m-%d %H:%M:%S KST')
 6. **ETH/BTC 비율 모니터링**: ETH/BTC z-score가 -2 이하 또는 +2 이상이면
    시장 구조 변화 신호로 보고 risk_alerts에 포함하세요.
 
-7. 결정을 내린 후, 아래 순서대로 실행하세요:
+7. **외부 지표 Data Fusion**: 고래/파생상품 데이터는 단독 매매 신호가 아닙니다.
+   반드시 2개 이상의 지표가 겹칠 때만 가중치를 부여하세요:
+   - 고래 활동 활발 + 롱 과밀 + FGI 탐욕 → 조정 경고, 매도 가중치 강화
+   - 숏 과밀 + 음수 펀딩비 + RSI 과매도 + FGI 공포 → 숏 스퀴즈, 매수 가중치 강화
+   - 김치 프리미엄 5%+ + 다른 과열 지표 → 고점 경고
+   JSON에 external_signal_analysis 필드를 포함하세요.
+
+8. 결정을 내린 후, 아래 순서대로 실행하세요:
 
    a) 결정이 매수 또는 매도인 경우:
       python3 scripts/execute_trade.py [bid|ask] KRW-BTC [금액|수량]
@@ -277,8 +346,9 @@ $(date '+%Y-%m-%d %H:%M:%S KST')
    b) 텔레그램 알림 전송:
       python3 scripts/notify_telegram.py trade "[결정 요약]" "[상세 근거]"
 
-8. 최종 결과를 JSON 형식으로 출력하세요. 반드시 다음 필드를 포함:
+9. 최종 결과를 JSON 형식으로 출력하세요. 반드시 다음 필드를 포함:
    - decision, confidence, reason, buy_score (점수 내역)
+   - external_signal_analysis (고래+파생상품+김치프리미엄 Data Fusion 판단)
    - strategy_switch_recommendation (전환 제안 또는 "없음")
    - performance_review (이전 결정 정확도 요약)
    - eth_btc_signal (ETH/BTC 비율 분석)

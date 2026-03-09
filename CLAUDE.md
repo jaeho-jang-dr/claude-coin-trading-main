@@ -110,6 +110,14 @@ claude-coin-trading/
 ├── .env.example                   # API 키 템플릿
 ├── strategy.md                    # 매매 전략 (LLM이 해석하는 핵심 파일)
 ├── requirements.txt               # Python 의존성
+├── agents/                        # 에이전트 기반 자율 매매 시스템
+│   ├── __init__.py                # 패키지 초기화
+│   ├── base_agent.py              # 추상 기본 클래스 (점수제 매수, 하이브리드 손절)
+│   ├── conservative.py            # 🛡️ 보수적 에이전트 (70점, 자산 보전)
+│   ├── moderate.py                # ⚖️ 보통 에이전트 (55점, 균형 매매)
+│   ├── aggressive.py              # 🔥 공격적 에이전트 (45점, 고수익)
+│   ├── external_data.py           # 외부 데이터 병렬 수집 에이전트
+│   └── orchestrator.py            # 감독 에이전트 (자율 전환 + DB 학습)
 ├── scripts/
 │   ├── collect_market_data.py     # Upbit 시장 데이터 + 기술지표 수집
 │   ├── collect_fear_greed.py      # 공포탐욕지수 수집
@@ -117,16 +125,18 @@ claude-coin-trading/
 │   ├── capture_chart.py           # Playwright 차트 캡처
 │   ├── execute_trade.py           # 매매 실행 (안전장치 내장)
 │   ├── get_portfolio.py           # 포트폴리오 조회
-│   ├── collect_ai_signal.py        # AI 복합 시그널 수집 (6가지 실시간 분석)
+│   ├── collect_ai_signal.py       # AI 복합 시그널 수집 (6가지 실시간 분석)
 │   ├── short_term_trader.py       # AI 단타 트레이딩 봇 (뉴스/급등급락/고래 3전략)
 │   ├── notify_telegram.py         # 텔레그램 알림 전송
-│   ├── run_analysis.sh            # 전체 분석 파이프라인 (cron용)
+│   ├── run_analysis.sh            # LLM 프롬프트 파이프라인 (레거시)
+│   ├── run_agents.sh              # 에이전트 모드 파이프라인 (신규)
 │   ├── cron_run.sh                # cron 실행 래퍼 (로깅, 에러 알림)
 │   └── setup_cron.sh              # cron 등록/해제 도우미
 ├── prompts/
 │   └── schemas/
 │       └── decision_result.json   # 매매 결정 JSON 스키마
 ├── data/
+│   ├── agent_state.json           # 에이전트 상태 (활성 전략, 전환 이력)
 │   ├── charts/                    # 캡처된 차트 이미지
 │   └── snapshots/                 # 실행 시점 데이터 스냅샷
 ├── logs/
@@ -134,30 +144,36 @@ claude-coin-trading/
 │   └── claude_responses/          # claude -p 원본 응답
 └── supabase/
     └── migrations/
-        └── 001_initial_schema.sql # DB 스키마
+        ├── 001_initial_schema.sql # DB 스키마
+        └── 004_agent_switches.sql # 에이전트 전환 이력 + 학습
 ```
 
 ## 실행 모드
 
-### 1. 자동 실행 (cron)
+### 1. 에이전트 모드 (권장)
 
 ```bash
-# cron 등록 도우미 사용 (권장)
-bash scripts/setup_cron.sh install    # 대화형으로 간격 선택 (4h/8h/12h/24h)
-bash scripts/setup_cron.sh status     # 등록 상태 확인
-bash scripts/setup_cron.sh remove     # cron 해제
+bash scripts/run_agents.sh              # 에이전트 자율 실행
+bash scripts/run_analysis.sh --agent    # 동일 (run_agents.sh로 위임)
 ```
 
-파이프라인: `cron_run.sh` → .env 로드 → 긴급정지 확인 → `run_analysis.sh` (데이터 수집 + AI 복합 시그널 + 프롬프트 조립) → `claude -p` 분석/실행 → DB 저장 → 텔레그램 알림
+파이프라인: `run_agents.sh` → 내부 데이터 병렬 수집 → ExternalDataAgent(외부 수집) → Orchestrator(전략 전환 + 매매 판단) → 매매 실행 → 텔레그램 알림 → Supabase 기록
 
-**cron_run.sh 기능:**
-- `.venv` Python 가상환경 자동 활성화
-- `EMERGENCY_STOP` 긴급 정지 체크
-- 실행 로그 자동 저장 (`logs/executions/`)
-- Claude 응답 원본 저장 (`logs/claude_responses/`)
-- 에러 발생 시 텔레그램 알림
+**에이전트 모드 특징:**
+- 감독 에이전트(Orchestrator)가 시장 상황을 점수화하여 **자율적으로** 전략 전환
+- 사용자 승인 없이 보수적↔보통↔공격적 자동 전환 (직행 포함)
+- 모든 전환 이력을 DB에 저장하고, 과거 성과를 학습하여 판단 개선
+- Python 에이전트가 직접 판단 (LLM 호출 불필요, 빠르고 저렴)
 
-### 2. 대화형 (Claude 세션)
+### 2. LLM 프롬프트 모드 (레거시)
+
+```bash
+bash scripts/run_analysis.sh 2>/dev/null | claude -p --dangerously-skip-permissions
+```
+
+파이프라인: `run_analysis.sh` → 데이터 수집 → 프롬프트 조립 → `claude -p` 분석/실행 → DB 저장 → 텔레그램 알림
+
+### 3. 대화형 (Claude 세션)
 
 ```bash
 cd ~/path/to/claude-coin-trading && claude
@@ -188,13 +204,86 @@ cd ~/path/to/claude-coin-trading && claude
 | `MAX_DAILY_TRADES` | `6` | 일일 매매 횟수 상한 |
 | `MAX_POSITION_RATIO` | `0.5` | 총 자산 대비 최대 투자 비율 |
 | `MIN_TRADE_INTERVAL_HOURS` | `4` | 최소 매매 간격 (시간) |
-| `EMERGENCY_STOP` | `false` | true: 모든 매매 즉시 중지 |
+| `EMERGENCY_STOP` | `false` | true: 모든 매매 즉시 중지 (사용자 수동) |
+
+**자동 긴급정지 (감독 권한):**
+- `data/auto_emergency.json` 플래그 파일로 관리
+- 발동 조건: 4h -10% 급락, cascade+danger 동시 극단, 외부 약세 5개+ 겹침, 연속손절 5회+
+- 발동 시: 전량 매도 + 매수 차단 + 텔레그램 알림
+- 해제 조건: 12시간 경과 + 급락 종료 + 공포 완화
+- 사용자가 수동 발동한 `.env EMERGENCY_STOP`은 감독이 해제할 수 없음
 
 **규칙:**
-- 매매 실행 전 반드시 `EMERGENCY_STOP` 확인
+- 매매 실행 전 반드시 `EMERGENCY_STOP` + `auto_emergency.json` 확인
 - 매매 실행 전 반드시 `DRY_RUN` 확인
 - `MAX_TRADE_AMOUNT` 초과 주문 금지
 - 안전장치 값은 사용자 명시적 요청 없이 변경 금지
+
+## 에이전트 아키텍처
+
+### 구조
+
+```
+Orchestrator (감독)
+  ├── 시장 상태 종합 평가 (danger_score + opportunity_score)
+  ├── 전략 전환 판단 (DB 학습 반영)
+  └── 활성 에이전트에게 위임
+       ├── 🛡️ ConservativeAgent (보수적)
+       ├── ⚖️ ModerateAgent (보통)
+       └── 🔥 AggressiveAgent (공격적)
+
+ExternalDataAgent (외부 데이터)
+  ├── FGI, 뉴스, 고래 추적, 바이낸스 심리
+  └── Data Fusion 종합 점수
+```
+
+### 감독의 전략 전환 원리
+
+감독은 두 가지 점수로 판단한다:
+
+**위험도(danger_score, 0~100):** 높을수록 보수적으로 전환
+- 연속 손절 (10점/회, 최대 30점)
+- BTC 과다 보유 (30% 초과 시 가산)
+- 급락 (24h -3% 이상, 최대 25점)
+- 김치 프리미엄 과열 (3%+, 최대 15점)
+- 롱 과밀 (L/S 1.2+, 최대 10점)
+
+**기회(opportunity_score, 0~100):** 높을수록 공격적으로 전환
+- 극단적 공포 (FGI ≤ 25, 최대 25점)
+- RSI 과매도 (< 35, 최대 20점)
+- 반등 중 (24h +1%+, 최대 15점)
+- Data Fusion 강세 (strong_buy 20점)
+- 숏 과밀/음수 펀딩비 (최대 10점)
+- 김치 디스카운트 (-1% 이하, 최대 10점)
+
+### 전환 규칙
+
+| 조건 | 전환 | 직행 허용 |
+|------|------|:---------:|
+| danger ≥ 70 | → 보수적 | ✅ 공격→보수 직행 |
+| danger 50~69 + 보통 | → 보수적 | — |
+| danger 45~69 + 공격적 | → 보통 | — |
+| opportunity ≥ 60 + danger < 30 | → 공격적 | ✅ 보수→공격 직행 |
+| opportunity 40~59 + danger < 35 | 보수→보통, 보통→공격 | — |
+| opportunity 25~39 + danger < 30 | 보수→보통 | — |
+| 횡보 (둘 다 < 25) | → 보통 | — |
+
+### FOMO 방지
+
+- 24h -5% 이상 급락 중에는 공격적 전환 차단
+- **예외**: FGI ≤ 20 극공포 + 하락폭 -8% 이내면 바닥 반등 판단 허용
+
+### 전환 쿨다운
+
+- 기본: 2시간 (마지막 전환 이후)
+- 당일 3회 이상 전환 시: 4시간으로 강화
+- **긴급 상황 면제**: danger ≥ 70 또는 24h -7% 이상이면 쿨다운 무시
+
+### DB 학습
+
+`agent_switches` 테이블에 모든 전환을 기록하고, 4시간/24시간 후 가격으로 성과를 평가한다.
+- 같은 전환 패턴(from→to)의 성공률이 40% 미만이고 3회 이상 데이터가 있으면 해당 전환 점수를 -10점 조정
+- 성과 평가: `profit_after_24h > 1%` → good, `< -1%` → bad, 나머지 → neutral
 
 ## 데이터베이스 (Supabase PostgreSQL)
 
@@ -206,6 +295,7 @@ cd ~/path/to/claude-coin-trading && claude
 | `feedback` | 사용자 피드백 (type, content, applied 여부) |
 | `execution_logs` | 실행 로그 (mode, duration, errors) |
 | `strategy_history` | 전략 변경 이력 (version, content, change_summary) |
+| `agent_switches` | 에이전트 전환 이력 + 성과 학습 (전환 시 시장 상태, 4h/24h 후 수익률) |
 
 ## 텔레그램 알림
 
@@ -249,11 +339,14 @@ cd ~/path/to/claude-coin-trading && claude
 
 | 소스 | API | 용도 | 인증 |
 |------|-----|------|------|
-| Upbit | `api.upbit.com/v1` | 시세, 호가, 캔들, 매매 실행 | JWT (Access + Secret Key) |
+| Upbit | `api.upbit.com/v1` | 시세, 호가, 캔들, 매매 실행, ETH/BTC 비율 | JWT (시세는 무료) |
 | Alternative.me | `api.alternative.me/fng/` | 공포/탐욕 지수 | 없음 (무료) |
-| Tavily | `api.tavily.com/search` | 뉴스 검색 + AI 요약 | API Key |
+| Tavily | `api.tavily.com/search` | 뉴스 검색 + 키워드 감성 분석 | API Key |
+| Binance Futures | `fapi.binance.com` | 롱숏비율, 펀딩비, OI, 김치프리미엄 | 없음 (무료) |
+| mempool.space | `mempool.space/api` | 블록체인 고래 추적 + 거래소 입출금 패턴 | 없음 (무료) |
+| Yahoo Finance | `query1.finance.yahoo.com` | S&P500, DXY, 금, 유가, 10Y 국채 | 없음 (무료) |
 | Playwright | headless Chromium | 차트 스크린샷 캡처 | 없음 |
-| Supabase | PostgreSQL (PostgREST) | 데이터 저장/조회 | Service Role Key |
+| Supabase | PostgreSQL (PostgREST) | 데이터 저장/조회/피드백/성과학습 | Service Role Key |
 | Telegram | `api.telegram.org/bot` | 실행 보고 알림 | Bot Token |
 
 ## 주의사항

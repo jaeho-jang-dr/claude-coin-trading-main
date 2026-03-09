@@ -65,13 +65,14 @@ $PastDecisions = "[]"
 if ($env:SUPABASE_URL -and $env:SUPABASE_SERVICE_ROLE_KEY) {
     try {
         $headers = @{
-            "apikey" = $env:SUPABASE_SERVICE_ROLE_KEY
+            "apikey"        = $env:SUPABASE_SERVICE_ROLE_KEY
             "Authorization" = "Bearer $($env:SUPABASE_SERVICE_ROLE_KEY)"
         }
         $PastDecisions = Invoke-RestMethod `
             -Uri "$($env:SUPABASE_URL)/rest/v1/decisions?select=*&order=created_at.desc&limit=10" `
             -Headers $headers -Method Get 2>$null | ConvertTo-Json -Depth 10
-    } catch { $PastDecisions = "[]" }
+    }
+    catch { $PastDecisions = "[]" }
 }
 
 # 미반영 피드백 조회
@@ -79,13 +80,72 @@ $Feedback = "[]"
 if ($env:SUPABASE_URL -and $env:SUPABASE_SERVICE_ROLE_KEY) {
     try {
         $headers = @{
-            "apikey" = $env:SUPABASE_SERVICE_ROLE_KEY
+            "apikey"        = $env:SUPABASE_SERVICE_ROLE_KEY
             "Authorization" = "Bearer $($env:SUPABASE_SERVICE_ROLE_KEY)"
         }
         $Feedback = Invoke-RestMethod `
             -Uri "$($env:SUPABASE_URL)/rest/v1/feedback?select=*&applied=eq.false&order=created_at.desc" `
             -Headers $headers -Method Get 2>$null | ConvertTo-Json -Depth 10
-    } catch { $Feedback = "[]" }
+    }
+    catch { $Feedback = "[]" }
+}
+
+# 로컬 피드백 편향치 (사용자 개입)
+$UserBiasState = "{}"
+if (Test-Path "data\orchestrator_state.json") {
+    try {
+        $UserBiasState = Get-Content "data\orchestrator_state.json" -Raw -Encoding UTF8
+    }
+    catch { $UserBiasState = "{}" }
+}
+
+# ETH/BTC 비율 및 도미넌스 데이터 수집
+$EthData = "{}"
+try {
+    $script = @"
+import requests, json, statistics
+try:
+    btc = requests.get('https://api.upbit.com/v1/ticker?markets=KRW-BTC').json()[0]
+    eth = requests.get('https://api.upbit.com/v1/ticker?markets=KRW-ETH').json()[0]
+    days = requests.get('https://api.upbit.com/v1/candles/days?market=KRW-BTC&count=20').json()
+    eth_days = requests.get('https://api.upbit.com/v1/candles/days?market=KRW-ETH&count=20').json()
+
+    current_ratio = eth['trade_price'] / btc['trade_price']
+    historical_ratios = [e['trade_price']/b['trade_price'] for e, b in zip(eth_days, days)]
+    mean = statistics.mean(historical_ratios)
+    stdev = statistics.stdev(historical_ratios) if len(historical_ratios) > 1 else 1
+
+    z_score = (current_ratio - mean) / stdev if stdev > 0 else 0
+    vr = (eth['acc_trade_price_24h']/eth['trade_price']) / ((btc['acc_trade_price_24h']/btc['trade_price']) + 1e-9)
+
+    out = {
+        'eth_btc_ratio': current_ratio,
+        'z_score_20d': z_score,
+        'volume_ratio': vr,
+        'is_altcoin_season': z_score > 1.5 and vr > 0.08,
+        'is_btc_dominance': z_score < -1.0
+    }
+    print(json.dumps(out))
+except Exception as e:
+    print('{}')
+"@
+    $EthData = & $Python -c $script
+}
+catch { $EthData = "{}" }
+
+# 성과 리뷰 조회
+$PerformanceReviews = "[]"
+if ($env:SUPABASE_URL -and $env:SUPABASE_SERVICE_ROLE_KEY) {
+    try {
+        $headers = @{
+            "apikey"        = $env:SUPABASE_SERVICE_ROLE_KEY
+            "Authorization" = "Bearer $($env:SUPABASE_SERVICE_ROLE_KEY)"
+        }
+        $PerformanceReviews = Invoke-RestMethod `
+            -Uri "$($env:SUPABASE_URL)/rest/v1/performance_reviews?select=*&order=reviewed_at.desc&limit=5" `
+            -Headers $headers -Method Get 2>$null | ConvertTo-Json -Depth 10
+    }
+    catch { $PerformanceReviews = "[]" }
 }
 
 $Now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -126,9 +186,24 @@ $Portfolio
 $PastDecisions
 
 ═══════════════════════════════════════════
+[과거 성과 리뷰 (최근 5건)]
+═══════════════════════════════════════════
+$PerformanceReviews
+
+═══════════════════════════════════════════
 [사용자 피드백 (미반영)]
 ═══════════════════════════════════════════
 $Feedback
+
+═══════════════════════════════════════════
+[사용자 수동 피드백 상태 (Bias)]
+═══════════════════════════════════════════
+$UserBiasState
+
+═══════════════════════════════════════════
+[ETH/BTC 및 도미넌스 지표]
+═══════════════════════════════════════════
+$EthData
 
 ═══════════════════════════════════════════
 [현재 시각]
@@ -139,10 +214,11 @@ $Now KST
 [지시사항]
 ═══════════════════════════════════════════
 
-1. 위 모든 데이터를 종합하여 시장 상황을 분석하세요.
-2. 전략 문서의 "활성 전략"을 확인하고, 해당 전략의 매수/매도/관망 조건과 대조하여 결정하세요.
-3. 사용자 피드백이 있다면 반드시 반영하세요.
-4. 결정을 내린 후, 아래 순서대로 실행하세요:
+1. 위 모든 데이터를 종합하여 시장 상황을 분석하세요. (ETH/BTC 도미넌스 참고)
+2. 전략 문서의 "활성 전략"을 확인하고, 매수/매도/관망 조건과 대조하여 결정하세요.
+3. 사용자 수동 피드백 상태(Bias)가 있다면 매수 판단 시 해당 Bias*20점 만큼 강력하게 가중치를 적용하세요.
+4. 과거 의사결정과 성과 리뷰(Performance Review)를 보고 실수나 실패 패턴이 있으면 반복하지 마세요.
+5. 결정을 내린 후, 아래 순서대로 실행하세요:
 
    a) 결정이 매수 또는 매도인 경우:
       .venv\Scripts\python.exe scripts\execute_trade.py [bid|ask] KRW-BTC [금액|수량]

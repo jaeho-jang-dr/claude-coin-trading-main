@@ -41,49 +41,87 @@ KST = timezone(timedelta(hours=9))
 LOCK_TIMEOUT_SECONDS = 120  # 2분 이상 된 락은 stale로 판단
 
 
-def acquire_lock():
-    """정규 매매 실행 중 락파일 생성. stale lock 자동 해제."""
+def acquire_lock(timeout=15):
+    """정규 매매 실행 중 락파일 생성. stale lock 자동 해제 + 타임아웃."""
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    start_time = time.time()
 
-    # stale lock 검사: 타임아웃 초과 또는 프로세스 사망 시 강제 해제
-    if LOCK_FILE.exists():
-        try:
-            data = json.loads(LOCK_FILE.read_text())
-            lock_time = datetime.fromisoformat(data["timestamp"])
-            age = (datetime.now(KST) - lock_time).total_seconds()
-            lock_pid = data.get("pid", 0)
-            # 프로세스 생존 확인 (pid=0이면 검사 생략)
-            pid_alive = False
-            if lock_pid > 0:
-                try:
-                    os.kill(lock_pid, 0)
-                    pid_alive = True
-                except (OSError, ProcessLookupError):
-                    pid_alive = False
-            if age > LOCK_TIMEOUT_SECONDS or not pid_alive:
-                print(f"[lock] stale lock 제거 (age={age:.0f}s, pid={lock_pid}, alive={pid_alive})", file=sys.stderr)
+    while True:
+        # stale lock 검사: 타임아웃 초과 또는 프로세스 사망 시 강제 해제
+        if LOCK_FILE.exists():
+            try:
+                data = json.loads(LOCK_FILE.read_text())
+                lock_time = datetime.fromisoformat(data["timestamp"])
+                age = (datetime.now(KST) - lock_time).total_seconds()
+                lock_pid = data.get("pid", 0)
+                # 프로세스 생존 확인 (pid=0이면 검사 생략)
+                pid_alive = False
+                if lock_pid > 0:
+                    try:
+                        os.kill(lock_pid, 0)
+                        pid_alive = True
+                    except (OSError, ProcessLookupError):
+                        pid_alive = False
+                if age > LOCK_TIMEOUT_SECONDS or not pid_alive:
+                    print(f"[lock] stale lock 제거 (age={age:.0f}s, pid={lock_pid}, alive={pid_alive})", file=sys.stderr)
+                    LOCK_FILE.unlink(missing_ok=True)
+                else:
+                    # Lock is valid and held by a live process — wait or timeout
+                    if time.time() - start_time > timeout:
+                        raise TimeoutError(f"락을 획득하지 못했습니다. 다른 매매 프로세스 실행 중 (pid={lock_pid}, age={age:.0f}s)")
+                    time.sleep(0.5)
+                    continue
+            except (json.JSONDecodeError, KeyError):
                 LOCK_FILE.unlink(missing_ok=True)
-            else:
-                raise RuntimeError(f"다른 매매 프로세스 실행 중 (pid={lock_pid}, age={age:.0f}s)")
-        except (json.JSONDecodeError, KeyError):
-            LOCK_FILE.unlink(missing_ok=True)
 
-    LOCK_FILE.write_text(json.dumps({
-        "process": "execute_trade",
-        "pid": os.getpid(),
-        "timestamp": datetime.now(KST).isoformat(),
-    }))
+        # 원자적 락 생성 시도
+        try:
+            with LOCK_FILE.open('x', encoding='utf-8') as f:
+                f.write(json.dumps({
+                    "process": "execute_trade",
+                    "pid": os.getpid(),
+                    "timestamp": datetime.now(KST).isoformat(),
+                }))
+            break
+        except FileExistsError:
+            if time.time() - start_time > timeout:
+                raise TimeoutError("락을 획득하지 못했습니다. 다른 매매가 진행 중일 수 있습니다.")
+            time.sleep(0.5)
 
 
 def release_lock():
     """락파일 해제"""
     try:
+        # 안전한 해제: 현재 pid가 일치할 때만 해제 (필요에 따라 강제 해제 허용)
         if LOCK_FILE.exists():
             data = json.loads(LOCK_FILE.read_text())
             if data.get("pid") == os.getpid():
                 LOCK_FILE.unlink(missing_ok=True)
     except Exception:
         LOCK_FILE.unlink(missing_ok=True)
+
+
+def check_open_orders_and_cancel(market: str, side: str):
+    """현재 진행 중인 미체결 주문(수정주문 lock)을 확인하고, 동일 방향이면 취소한다."""
+    try:
+        qs = urlencode({"market": market, "state": "wait"})
+        headers = make_auth_header(qs)
+        r = requests.get(f"{UPBIT_API}/orders", params={"market": market, "state": "wait"}, headers=headers, timeout=10)
+        if not r.ok:
+            return
+        
+        open_orders = r.json()
+        for order in open_orders:
+            # 같은 방향이거나 양방향 안전 확보를 위해 기존 주문 정리
+            if order.get("side") == side:
+                uuid_to_cancel = order.get("uuid")
+                cancel_qs = urlencode({"uuid": uuid_to_cancel})
+                cancel_headers = make_auth_header(cancel_qs)
+                requests.delete(f"{UPBIT_API}/order", params={"uuid": uuid_to_cancel}, headers=cancel_headers, timeout=10)
+                time.sleep(0.2)
+    except Exception as e:
+        print(f"[warning] 미체결 주문 정리 중 오류: {e}", file=sys.stderr)
+
 
 
 def make_auth_header(query_string: str) -> dict:
@@ -101,7 +139,7 @@ def make_auth_header(query_string: str) -> dict:
 def execute(side: str, market: str, amount: str):
     ts = time.strftime("%Y-%m-%dT%H:%M:%S+09:00")
 
-    # 1) 긴급 정지 확인
+    # 1a) 사용자 긴급 정지 확인
     if os.environ.get("EMERGENCY_STOP", "false").lower() == "true":
         return {
             "success": False,
@@ -109,9 +147,28 @@ def execute(side: str, market: str, amount: str):
             "side": side,
             "market": market,
             "amount": amount,
-            "error": "EMERGENCY_STOP 활성화 - 매매 차단",
+            "error": "사용자 EMERGENCY_STOP 활성화 - 매매 차단",
             "timestamp": ts,
         }
+
+    # 1b) 감독 자동 긴급정지 확인 (긴급정지 중 매도는 허용)
+    auto_em_file = PROJECT_DIR / "data" / "auto_emergency.json"
+    if auto_em_file.exists() and side == "bid":  # 매수만 차단, 매도(청산)는 허용
+        try:
+            import json as _json
+            auto_em = _json.loads(auto_em_file.read_text(encoding="utf-8"))
+            if auto_em.get("active"):
+                return {
+                    "success": False,
+                    "dry_run": False,
+                    "side": side,
+                    "market": market,
+                    "amount": amount,
+                    "error": f"감독 자동긴급정지 활성 - 매수 차단 (사유: {auto_em.get('reason', '?')})",
+                    "timestamp": ts,
+                }
+        except Exception:
+            pass
 
     # 2) DRY_RUN 확인
     if os.environ.get("DRY_RUN", "true").lower() == "true":
@@ -140,7 +197,7 @@ def execute(side: str, market: str, amount: str):
     # 4) 주문 실행 (락파일로 단타 봇과 동시 실행 방지)
     try:
         acquire_lock()
-    except RuntimeError as e:
+    except TimeoutError as e:
         return {
             "success": False,
             "dry_run": False,
@@ -152,6 +209,9 @@ def execute(side: str, market: str, amount: str):
         }
 
     try:
+        # 5) 수정주문 / 미체결 주문 처리 (수정주문 lock 관리)
+        check_open_orders_and_cancel(market, side)
+        
         body = {"market": market, "side": side}
         if side == "bid":
             body["ord_type"] = "price"  # 시장가 매수

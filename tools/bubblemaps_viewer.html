@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bubblemaps Token Viewer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0a0a1a;
+    color: #e0e0e0;
+    min-height: 100vh;
+  }
+
+  .header {
+    background: linear-gradient(135deg, #1a1a3e 0%, #0d0d2b 100%);
+    border-bottom: 1px solid #2a2a5a;
+    padding: 20px 30px;
+  }
+  .header h1 {
+    font-size: 24px;
+    background: linear-gradient(90deg, #00d4ff, #7b2ff7);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 5px;
+  }
+  .header p { color: #888; font-size: 13px; }
+
+  .controls {
+    display: flex;
+    gap: 12px;
+    padding: 20px 30px;
+    background: #0f0f2a;
+    border-bottom: 1px solid #1a1a3e;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .controls label {
+    font-size: 13px;
+    color: #aaa;
+    min-width: 50px;
+  }
+  .controls select {
+    background: #1a1a3e;
+    color: #e0e0e0;
+    border: 1px solid #333;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .controls input[type="text"] {
+    flex: 1;
+    min-width: 300px;
+    background: #1a1a3e;
+    color: #e0e0e0;
+    border: 1px solid #333;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-family: 'Courier New', monospace;
+  }
+  .controls input::placeholder { color: #555; }
+  .controls button {
+    background: linear-gradient(135deg, #7b2ff7, #00d4ff);
+    color: white;
+    border: none;
+    padding: 10px 24px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.2s;
+  }
+  .controls button:hover { opacity: 0.85; }
+
+  .info-bar {
+    display: flex;
+    gap: 20px;
+    padding: 12px 30px;
+    background: #0d0d25;
+    border-bottom: 1px solid #1a1a3e;
+    font-size: 12px;
+    color: #666;
+    flex-wrap: wrap;
+  }
+  .info-bar a {
+    color: #7b8fff;
+    text-decoration: none;
+  }
+  .info-bar a:hover { text-decoration: underline; }
+
+  .map-container {
+    position: relative;
+    width: 100%;
+    height: calc(100vh - 200px);
+    min-height: 500px;
+  }
+  .map-container iframe {
+    width: 100%;
+    height: 100%;
+    border: none;
+  }
+
+  .placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: calc(100vh - 200px);
+    min-height: 500px;
+    color: #444;
+    gap: 16px;
+  }
+  .placeholder .icon { font-size: 80px; opacity: 0.3; }
+  .placeholder h2 { font-size: 20px; color: #555; }
+  .placeholder p { font-size: 14px; max-width: 500px; text-align: center; line-height: 1.6; }
+  .placeholder .steps {
+    text-align: left;
+    background: #12122e;
+    padding: 20px 28px;
+    border-radius: 12px;
+    border: 1px solid #1f1f4a;
+    margin-top: 10px;
+  }
+  .placeholder .steps li {
+    margin: 8px 0;
+    color: #888;
+    font-size: 13px;
+  }
+  .placeholder .steps li strong { color: #aaa; }
+
+  .status {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(10,10,26,0.9);
+    padding: 20px 30px;
+    border-radius: 12px;
+    border: 1px solid #2a2a5a;
+    text-align: center;
+    z-index: 10;
+    display: none;
+  }
+  .status.loading { display: block; }
+  .status .spinner {
+    width: 40px; height: 40px;
+    border: 3px solid #333;
+    border-top: 3px solid #7b2ff7;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin: 0 auto 12px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .error-msg {
+    background: #2a1020;
+    border: 1px solid #5a2040;
+    color: #ff6b8a;
+    padding: 12px 20px;
+    margin: 10px 30px;
+    border-radius: 8px;
+    font-size: 13px;
+    display: none;
+  }
+
+  .quick-links {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .quick-links button {
+    background: #1a1a3e;
+    color: #aaa;
+    border: 1px solid #2a2a5a;
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .quick-links button:hover {
+    border-color: #7b2ff7;
+    color: #e0e0e0;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Bubblemaps Token Viewer</h1>
+  <p>토큰 홀더 분포 시각화 — 지갑 간 연결, 대량 보유자, 클러스터 분석</p>
+</div>
+
+<div class="controls">
+  <label for="chain">체인:</label>
+  <select id="chain">
+    <option value="sol">Solana (SOL)</option>
+    <option value="eth">Ethereum (ETH)</option>
+    <option value="bsc">BSC (BNB)</option>
+    <option value="base">Base</option>
+    <option value="arbi">Arbitrum</option>
+    <option value="poly">Polygon</option>
+    <option value="avax">Avalanche</option>
+    <option value="ftm">Fantom</option>
+    <option value="sonic">Sonic</option>
+  </select>
+
+  <input type="text" id="address" placeholder="토큰 컨트랙트 주소 (CA) 입력..." />
+  <button onclick="loadMap()">맵 보기</button>
+</div>
+
+<div class="info-bar">
+  <span>예시:</span>
+  <div class="quick-links">
+    <button onclick="quickLoad('sol','JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN')">JUP (Solana)</button>
+    <button onclick="quickLoad('eth','0xdac17f958d2ee523a2206206994597c13d831ec7')">USDT (ETH)</button>
+    <button onclick="quickLoad('sol','DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263')">BONK (Solana)</button>
+    <button onclick="quickLoad('eth','0x6982508145454Ce325dDbE47a25d4ec3d2311933')">PEPE (ETH)</button>
+    <button onclick="quickLoad('sol','EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm')">WIF (Solana)</button>
+  </div>
+  <span style="margin-left:auto;">
+    <a href="https://bubblemaps.io" target="_blank">bubblemaps.io</a> |
+    <a href="https://dexscreener.com" target="_blank">DexScreener</a> |
+    <a href="https://pump.fun" target="_blank">pump.fun</a>
+  </span>
+</div>
+
+<div class="error-msg" id="error"></div>
+
+<div id="placeholder" class="placeholder">
+  <div class="icon">🫧</div>
+  <h2>토큰 주소를 입력하세요</h2>
+  <p>
+    Bubblemaps는 상위 250개 홀더를 버블로 시각화합니다.<br>
+    버블이 클수록 많이 보유, 선으로 연결되면 지갑 간 전송 이력이 있습니다.
+  </p>
+  <ol class="steps">
+    <li><strong>1.</strong> 체인 선택 (Solana, Ethereum, BSC 등)</li>
+    <li><strong>2.</strong> 토큰 컨트랙트 주소(CA) 입력</li>
+    <li><strong>3.</strong> "맵 보기" 클릭</li>
+    <li><strong>4.</strong> 버블을 클릭하면 지갑 주소, 보유량, 클러스터 정보 확인</li>
+  </ol>
+  <p style="margin-top:15px; color:#555; font-size:12px;">
+    CA를 모르면 DexScreener나 pump.fun에서 토큰 이름으로 검색하세요
+  </p>
+</div>
+
+<div class="map-container" id="mapContainer" style="display:none;">
+  <div class="status" id="loading">
+    <div class="spinner"></div>
+    <div>맵 로딩 중...</div>
+  </div>
+  <iframe id="mapFrame" sandbox="allow-scripts allow-same-origin allow-popups"></iframe>
+</div>
+
+<script>
+  const chainSelect = document.getElementById('chain');
+  const addressInput = document.getElementById('address');
+  const mapContainer = document.getElementById('mapContainer');
+  const placeholder = document.getElementById('placeholder');
+  const mapFrame = document.getElementById('mapFrame');
+  const loading = document.getElementById('loading');
+  const errorDiv = document.getElementById('error');
+
+  // URL 파라미터에서 자동 로드
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('address')) {
+    addressInput.value = params.get('address');
+    if (params.get('chain')) chainSelect.value = params.get('chain');
+    window.addEventListener('load', () => loadMap());
+  }
+
+  function showError(msg) {
+    errorDiv.textContent = msg;
+    errorDiv.style.display = 'block';
+    setTimeout(() => { errorDiv.style.display = 'none'; }, 5000);
+  }
+
+  function quickLoad(chain, address) {
+    chainSelect.value = chain;
+    addressInput.value = address;
+    loadMap();
+  }
+
+  async function loadMap() {
+    const chain = chainSelect.value;
+    const address = addressInput.value.trim();
+
+    if (!address) {
+      showError('토큰 주소를 입력해주세요.');
+      return;
+    }
+
+    // 주소 형식 검증
+    if (chain === 'sol') {
+      if (address.length < 32 || address.length > 50) {
+        showError('Solana 주소는 32~44자 Base58 형식입니다. 주소를 확인해주세요.');
+        return;
+      }
+    } else {
+      if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
+        showError('EVM 주소는 0x로 시작하는 42자 형식입니다. 주소를 확인해주세요.');
+        return;
+      }
+    }
+
+    errorDiv.style.display = 'none';
+    placeholder.style.display = 'none';
+    mapContainer.style.display = 'block';
+    loading.classList.add('loading');
+
+    // URL 업데이트
+    const url = new URL(window.location);
+    url.searchParams.set('chain', chain);
+    url.searchParams.set('address', address);
+    history.replaceState(null, '', url);
+
+    // 맵 가용성 확인
+    try {
+      const checkUrl = `https://api-legacy.bubblemaps.io/map-availability?chain=${chain}&token=${address}`;
+      const resp = await fetch(checkUrl);
+      const data = await resp.json();
+      if (!data.availability) {
+        loading.classList.remove('loading');
+        showError(
+          '이 토큰의 Bubblemaps 데이터가 아직 없습니다. ' +
+          '새로 발행된 토큰이거나 Bubblemaps에서 지원하지 않는 토큰일 수 있습니다. ' +
+          'bubblemaps.io에서 직접 검색해보세요.'
+        );
+        return;
+      }
+    } catch (e) {
+      // API 체크 실패해도 iframe 로드 시도
+      console.warn('Availability check failed, attempting load anyway:', e);
+    }
+
+    // Bubblemaps iframe 로드
+    const mapUrl = `https://app.bubblemaps.io/${chain}/token/${address}?small_text`;
+    mapFrame.src = mapUrl;
+
+    mapFrame.onload = () => {
+      loading.classList.remove('loading');
+    };
+
+    // 타임아웃
+    setTimeout(() => {
+      loading.classList.remove('loading');
+    }, 15000);
+  }
+
+  // Enter 키 지원
+  addressInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') loadMap();
+  });
+</script>
+
+</body>
+</html>

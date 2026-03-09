@@ -112,8 +112,10 @@ def analyze_whale_trades(market: str) -> dict:
 
     buy_vol = sell_vol = 0.0
     buy_count = sell_count = 0
-    large_trades = []
-    whale_threshold_krw = 1_000_000  # 100만원
+    whale_trades = []       # 1,000만원+ (고래)
+    mega_whale_trades = []  # 5,000만원+ (대형 고래)
+    whale_threshold_krw = 10_000_000       # 1,000만원 (상위 ~3.5%)
+    mega_whale_threshold_krw = 50_000_000  # 5,000만원 (상위 ~0.5%)
 
     for t in trades:
         vol = abs(t.get("trade_volume", 0))
@@ -129,18 +131,24 @@ def analyze_whale_trades(market: str) -> dict:
             sell_count += 1
 
         if krw >= whale_threshold_krw:
-            large_trades.append({
+            entry = {
                 "side": side,
                 "volume": round(vol, 8),
                 "price": price,
                 "krw_amount": round(krw),
                 "time": t.get("trade_time_utc", ""),
-            })
+                "is_mega": krw >= mega_whale_threshold_krw,
+            }
+            whale_trades.append(entry)
+            if krw >= mega_whale_threshold_krw:
+                mega_whale_trades.append(entry)
 
     total_vol = buy_vol + sell_vol
     buy_ratio = round(buy_vol / max(total_vol, 1e-8) * 100, 1)
-    whale_buy = sum(1 for t in large_trades if t["side"] == "BID")
-    whale_sell = len(large_trades) - whale_buy
+    whale_buy = sum(1 for t in whale_trades if t["side"] == "BID")
+    whale_sell = len(whale_trades) - whale_buy
+    mega_buy = sum(1 for t in mega_whale_trades if t["side"] == "BID")
+    mega_sell = len(mega_whale_trades) - mega_buy
 
     return {
         "total_trades": len(trades),
@@ -152,7 +160,8 @@ def analyze_whale_trades(market: str) -> dict:
         "trade_pressure": (
             "buy" if buy_ratio > 55 else "sell" if buy_ratio < 45 else "neutral"
         ),
-        "whale_trades_count": len(large_trades),
+        "whale_threshold_krw": whale_threshold_krw,
+        "whale_trades_count": len(whale_trades),
         "whale_buy": whale_buy,
         "whale_sell": whale_sell,
         "whale_signal": (
@@ -160,7 +169,11 @@ def analyze_whale_trades(market: str) -> dict:
             else "sell" if whale_sell > whale_buy
             else "neutral"
         ),
-        "top_whale_trades": large_trades[:5],
+        "mega_whale_threshold_krw": mega_whale_threshold_krw,
+        "mega_whale_count": len(mega_whale_trades),
+        "mega_whale_buy": mega_buy,
+        "mega_whale_sell": mega_sell,
+        "top_whale_trades": whale_trades[:5],
     }
 
 
@@ -322,19 +335,30 @@ def compute_composite_score(
         components.append({"name": "trade_pressure", "score": pts,
                            "detail": f"매도 체결 {100-buy_r}%"})
 
-    # 3) 고래 방향 (최대 +/-15)
+    # 3) 고래 방향 (최대 +/-15, 1000만원+ 기준)
     wb = whale.get("whale_buy", 0)
     ws = whale.get("whale_sell", 0)
-    if wb > ws and (wb + ws) >= 3:
-        pts = min(int((wb - ws) * 5), 15)
+    mega_b = whale.get("mega_whale_buy", 0)
+    mega_s = whale.get("mega_whale_sell", 0)
+
+    # 대형 고래(5000만원+)는 가중치 2배
+    weighted_buy = wb + mega_b  # 대형 고래는 이미 wb에 포함 + 추가 가중
+    weighted_sell = ws + mega_s
+
+    if weighted_buy > weighted_sell and (wb + ws) >= 2:
+        pts = min(int((weighted_buy - weighted_sell) * 5), 15)
         score += pts
-        components.append({"name": "whale_direction", "score": pts,
-                           "detail": f"고래 매수 {wb}건 vs 매도 {ws}건"})
-    elif ws > wb and (wb + ws) >= 3:
-        pts = max(int((wb - ws) * 5), -15)
+        detail = f"고래 매수 {wb}건 vs 매도 {ws}건"
+        if mega_b > 0:
+            detail += f" (대형고래 매수 {mega_b}건)"
+        components.append({"name": "whale_direction", "score": pts, "detail": detail})
+    elif weighted_sell > weighted_buy and (wb + ws) >= 2:
+        pts = max(int((weighted_buy - weighted_sell) * 5), -15)
         score += pts
-        components.append({"name": "whale_direction", "score": pts,
-                           "detail": f"고래 매도 {ws}건 vs 매수 {wb}건"})
+        detail = f"고래 매도 {ws}건 vs 매수 {wb}건"
+        if mega_s > 0:
+            detail += f" (대형고래 매도 {mega_s}건)"
+        components.append({"name": "whale_direction", "score": pts, "detail": detail})
 
     # 4) 다이버전스 (최대 +/-10)
     div_type = multi_tf.get("divergence_type")

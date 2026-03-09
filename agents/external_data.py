@@ -8,6 +8,7 @@
   - binance_sentiment.py → 롱숏/펀딩비/김치P
   - collect_eth_btc.py → ETH/BTC 비율 + z-score
   - collect_macro.py → 매크로 경제 지표 (S&P500, DXY, 금, 유가, 10Y)
+  - collect_crypto_signals.py → CoinGecko 거래량 이상 감지 (MCP 연동)
   - calculate_external_signal.py → Data Fusion 종합
   + 뉴스 감성 분석 (키워드 기반)
   + Supabase: 사용자 피드백, 과거 결정 성과
@@ -145,6 +146,37 @@ def analyze_news_sentiment(news_data: dict) -> dict:
     }
 
 
+# ── 뉴스 압축 ──────────────────────────────────────
+
+def _compress_news(news_data: dict) -> dict:
+    """뉴스 JSON을 압축하여 토큰 비용을 절감한다 (10-15KB → 2-4KB)."""
+    articles = news_data.get("articles", [])
+    if not articles:
+        return news_data
+
+    categories: dict[str, list] = {}
+    for a in articles:
+        cat = a.get("category", "unknown")
+        if cat not in categories:
+            categories[cat] = []
+        content = (a.get("content", "") or "")[:100]
+        if len(a.get("content", "") or "") > 100:
+            content += "..."
+        compressed = {"title": a.get("title", ""), "snippet": content}
+        score = a.get("score", 0)
+        if score:
+            compressed["score"] = round(score, 2)
+        categories[cat].append(compressed)
+
+    return {
+        "timestamp": news_data.get("timestamp", ""),
+        "articles_count": len(articles),
+        "by_category": {cat: len(arts) for cat, arts in categories.items()},
+        "categories": categories,
+        "tavily_remaining": news_data.get("tavily_usage", {}).get("remaining", "N/A"),
+    }
+
+
 # ── Supabase 조회 ──────────────────────────────────
 
 def _load_supabase(endpoint: str, params: dict) -> list | dict:
@@ -262,12 +294,13 @@ class ExternalDataAgent:
             "binance_sentiment": ("binance_sentiment.py", None),
             "eth_btc": ("collect_eth_btc.py", None),
             "macro": ("collect_macro.py", None),
+            "crypto_signals": ("collect_crypto_signals.py", None),
         }
 
         results: dict = {}
         start = time.time()
 
-        with ThreadPoolExecutor(max_workers=6) as pool:
+        with ThreadPoolExecutor(max_workers=7) as pool:
             futures = {
                 pool.submit(_run_script, script, args): name
                 for name, (script, args) in tasks.items()
@@ -281,9 +314,12 @@ class ExternalDataAgent:
 
         elapsed = round(time.time() - start, 1)
 
-        # 뉴스 감성 분석 (키워드 기반)
+        # 뉴스 감성 분석 (키워드 기반 — 압축 전 원본으로 수행)
         news_sentiment = analyze_news_sentiment(results.get("news", {}))
         results["news_sentiment"] = news_sentiment
+
+        # 뉴스 압축 (토큰 절감: 10-15KB → 2-4KB)
+        results["news"] = _compress_news(results.get("news", {}))
 
         # 사용자 피드백 로드
         feedback = load_user_feedback()
@@ -336,7 +372,7 @@ class ExternalDataAgent:
 
         # 매크로 점수 (±15)
         macro = results.get("macro", {}).get("analysis", {})
-        macro_score = macro.get("macro_score", 0)
+        macro_score = macro.get("macro_score", 0) or 0
         if macro_score != 0:
             # ±30 → ±15 리스케일
             macro_adj = max(-15, min(15, int(macro_score * 0.5)))
@@ -345,7 +381,7 @@ class ExternalDataAgent:
 
         # ETH/BTC 이상 감지 (±5)
         eth = results.get("eth_btc", {})
-        z = eth.get("eth_btc_z_score", 0)
+        z = eth.get("eth_btc_z_score", 0) or 0
         if abs(z) >= 2:
             eth_adj = 5 if z < -2 else -5
             extra_score += eth_adj
@@ -353,7 +389,7 @@ class ExternalDataAgent:
 
         # 뉴스 감성 (±10)
         ns = results.get("news_sentiment", {})
-        sent_score = ns.get("sentiment_score", 0)
+        sent_score = ns.get("sentiment_score", 0) or 0
         if sent_score >= 30:
             news_adj = 10
         elif sent_score >= 10:
@@ -368,6 +404,26 @@ class ExternalDataAgent:
             extra_score += news_adj
             extra_details.append(f"뉴스 감성 {ns.get('overall_sentiment', 'neutral')}: {news_adj:+d}점")
 
+        # CoinGecko 거래량 이상 감지 (±10)
+        cs = results.get("crypto_signals", {}) or {}
+        btc_signal = cs.get("btc") or {}
+        crypto_adj = 0
+        if btc_signal:
+            btc_anomaly = btc_signal.get("anomaly_level", "LOW")
+            btc_change = btc_signal.get("change_24h", 0) or 0
+            if btc_anomaly in ("HIGH", "CRITICAL"):
+                # 거래량 급증 + 방향으로 판단
+                crypto_adj = 10 if btc_change > 0 else -10
+            elif btc_anomaly == "MODERATE" and abs(btc_change) > 3:
+                crypto_adj = 5 if btc_change > 0 else -5
+        alert_count = cs.get("anomaly_alerts", {}).get("count", 0)
+        if alert_count >= 30:
+            # 시장 전체 과열 → 변동성 경고
+            extra_details.append(f"CoinGecko 이상 {alert_count}건: 시장 변동성 높음")
+        if crypto_adj != 0:
+            extra_score += crypto_adj
+            extra_details.append(f"BTC 거래량 {btc_anomaly}: {crypto_adj:+d}점")
+
         # 기존 total_score에 추가
         old_total = fusion.get("total_score", 0)
         new_total = old_total + extra_score
@@ -378,6 +434,7 @@ class ExternalDataAgent:
             "macro": {"score": macro_adj if macro_score != 0 else 0, "max": 15},
             "eth_btc": {"score": eth_adj if abs(z) >= 2 else 0, "max": 5},
             "news_sentiment": {"score": news_adj, "max": 10},
+            "crypto_signals": {"score": crypto_adj, "max": 10},
         }
         fusion["extra_details"] = extra_details
 
@@ -410,22 +467,23 @@ class ExternalDataAgent:
         # 바이낸스 심리
         bs = results.get("binance_sentiment", {})
         sentiment = bs.get("sentiment_score", {})
-        bs_score = sentiment.get("score", 0)
+        bs_score = sentiment.get("score", 0) if isinstance(sentiment, dict) else 0
         score -= bs_score
 
         # 고래 활동
         wt = results.get("whale_tracker", {})
-        ws = wt.get("whale_score", {}).get("score", 0)
+        ws_obj = wt.get("whale_score", {})
+        ws = ws_obj.get("score", 0) if isinstance(ws_obj, dict) else 0
         score += ws
 
         # 매크로
         macro = results.get("macro", {}).get("analysis", {})
-        macro_score = macro.get("macro_score", 0)
+        macro_score = macro.get("macro_score", 0) or 0
         score += max(-15, min(15, int(macro_score * 0.5)))
 
         # 뉴스 감성
         ns = results.get("news_sentiment", {})
-        sent = ns.get("sentiment_score", 0)
+        sent = ns.get("sentiment_score", 0) or 0
         if sent >= 30:
             score += 10
         elif sent >= 10:
@@ -434,6 +492,17 @@ class ExternalDataAgent:
             score -= 10
         elif sent <= -10:
             score -= 5
+
+        # CoinGecko 거래량 이상
+        cs = results.get("crypto_signals", {}) or {}
+        btc_sig = cs.get("btc") or {}
+        if btc_sig:
+            btc_anom = btc_sig.get("anomaly_level", "LOW")
+            btc_chg = btc_sig.get("change_24h", 0) or 0
+            if btc_anom in ("HIGH", "CRITICAL"):
+                score += 10 if btc_chg > 0 else -10
+            elif btc_anom == "MODERATE" and abs(btc_chg) > 3:
+                score += 5 if btc_chg > 0 else -5
 
         # strategy_bonus 매핑
         if score >= 40:

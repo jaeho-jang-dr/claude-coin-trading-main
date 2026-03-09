@@ -22,6 +22,12 @@ log() {
 mkdir -p "$LOG_DIR" "$PROJECT_DIR/data/charts" "$PROJECT_DIR/data/snapshots"
 log "=== Startup begin ==="
 
+# --- 0.1 오래된 데이터 자동 정리 ---
+find "$PROJECT_DIR/data/snapshots" -maxdepth 1 -type d -mtime +7 -exec rm -rf {} + 2>/dev/null
+find "$PROJECT_DIR/data/charts" -name "*.png" -mtime +7 -delete 2>/dev/null
+find "$LOG_DIR" -name "*.log" -size +10M -exec truncate -s 1M {} \; 2>/dev/null
+log "Cleanup: old snapshots/charts/logs trimmed"
+
 # --- 1. 기존 세션 정리 ---
 tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
 # 기존 대시보드 프로세스 정리

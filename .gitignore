@@ -17,6 +17,8 @@ supabase/config.toml
 # === Python ===
 __pycache__/
 *.pyc
+.pytest_cache/
+.coverage
 
 # === 기타 ===
 *.sqlite

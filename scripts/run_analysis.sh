@@ -53,9 +53,11 @@ python3 scripts/collect_market_data.py > "${SNAPSHOT_DIR}/market_data.json" 2>/d
 python3 scripts/collect_fear_greed.py > "${SNAPSHOT_DIR}/fear_greed.json" 2>/dev/null \
   || echo '{"error":"fear_greed 수집 실패"}' > "${SNAPSHOT_DIR}/fear_greed.json"
 
-# 3. 뉴스 수집
-python3 scripts/collect_news.py > "${SNAPSHOT_DIR}/news.json" 2>/dev/null \
-  || echo '{"error":"news 수집 실패"}' > "${SNAPSHOT_DIR}/news.json"
+# 3. 뉴스 수집 + 압축 (토큰 절감: 10-15KB → 2-4KB)
+python3 scripts/collect_news.py > "${SNAPSHOT_DIR}/news_full.json" 2>/dev/null \
+  || echo '{"error":"news 수집 실패"}' > "${SNAPSHOT_DIR}/news_full.json"
+python3 scripts/summarize_news.py "${SNAPSHOT_DIR}/news_full.json" > "${SNAPSHOT_DIR}/news.json" 2>/dev/null \
+  || cp "${SNAPSHOT_DIR}/news_full.json" "${SNAPSHOT_DIR}/news.json"
 
 # 4. 차트 캡처
 python3 scripts/capture_chart.py > "${SNAPSHOT_DIR}/chart_paths.json" 2>/dev/null \
@@ -81,6 +83,10 @@ python3 scripts/whale_tracker.py > "${SNAPSHOT_DIR}/whale_tracker.json" 2>/dev/n
 python3 scripts/binance_sentiment.py > "${SNAPSHOT_DIR}/binance_sentiment.json" 2>/dev/null \
   || echo '{"error":"binance_sentiment 수집 실패"}' > "${SNAPSHOT_DIR}/binance_sentiment.json"
 
+# 11. CoinGecko 거래량 이상 감지 (crypto-signals, 무료)
+python3 scripts/collect_crypto_signals.py > "${SNAPSHOT_DIR}/crypto_signals.json" 2>/dev/null \
+  || echo '{"error":"crypto_signals 수집 실패"}' > "${SNAPSHOT_DIR}/crypto_signals.json"
+
 echo "[$(date)] 데이터 수집 완료. 외부 시그널 종합 중..." >&2
 
 # 10. 외부 지표 종합 점수 산출 (Data Fusion)
@@ -100,6 +106,7 @@ ONCHAIN=$(cat "${SNAPSHOT_DIR}/onchain.json")
 WHALE_TRACKER=$(cat "${SNAPSHOT_DIR}/whale_tracker.json")
 BINANCE_SENTIMENT=$(cat "${SNAPSHOT_DIR}/binance_sentiment.json")
 EXTERNAL_SIGNAL=$(cat "${SNAPSHOT_DIR}/external_signal.json")
+CRYPTO_SIGNALS=$(cat "${SNAPSHOT_DIR}/crypto_signals.json")
 
 # Supabase에서 과거 결정 조회 (최근 10건) - PostgREST API 사용
 PAST_DECISIONS="[]"
@@ -252,6 +259,15 @@ ${BINANCE_SENTIMENT}
 - 롱/숏 비율 0.7- & 펀딩비 음수 = 숏 과밀 → 숏 스퀴즈(반등) 가능
 - 김치 프리미엄 5%+ = 국내 FOMO → 과열 경고
 - 김치 프리미엄 -3%  = 디스카운트 → 매수 기회 가능
+
+═══════════════════════════════════════════
+[CoinGecko 거래량 이상 감지 (Crypto Signals)]
+═══════════════════════════════════════════
+${CRYPTO_SIGNALS}
+해석:
+- BTC vol_mcap_ratio > 5% = 비정상적 거래량 급증 → 큰 움직임 예고
+- anomaly_alerts에 주요 토큰 포함 시 시장 전체 변동성 증가 시그널
+- ETH anomaly_level이 HIGH/CRITICAL이면 알트 과열 경고
 
 ═══════════════════════════════════════════
 [★ 외부 지표 종합 시그널 (Data Fusion)]

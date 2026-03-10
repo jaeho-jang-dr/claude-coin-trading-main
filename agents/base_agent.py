@@ -7,9 +7,18 @@
 
 from __future__ import annotations
 
+import json
+import os
+import sys
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
+
+import requests
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
 @dataclass
@@ -333,6 +342,133 @@ class BaseStrategyAgent(ABC):
                 }
 
         return None
+
+    def save_buy_score_detail(
+        self,
+        decision: Decision,
+        market_data: dict,
+    ) -> None:
+        """매수 점수 상세 내역을 buy_score_detail 테이블에 저장한다.
+
+        DB 저장 실패가 매매 로직에 영향을 주지 않도록 전체를 try/except로 감싼다.
+        """
+        try:
+            supabase_url = os.getenv("SUPABASE_URL", "")
+            supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+            if not supabase_url or not supabase_key:
+                return
+
+            bs = decision.buy_score or {}
+            fgi_obj = bs.get("fgi", {}) if isinstance(bs.get("fgi"), dict) else {}
+            rsi_obj = bs.get("rsi", {}) if isinstance(bs.get("rsi"), dict) else {}
+            sma_obj = bs.get("sma", {}) if isinstance(bs.get("sma"), dict) else {}
+            news_obj = bs.get("news", {}) if isinstance(bs.get("news"), dict) else {}
+            ext_obj = bs.get("external", {}) if isinstance(bs.get("external"), dict) else {}
+
+            indicators = market_data.get("indicators", {})
+            ticker = market_data.get("ticker", {})
+
+            # SMA position description
+            sma_val = sma_obj.get("value", 0)
+            sma_position = "above" if sma_val >= 0 else f"below_{abs(sma_val):.1f}%"
+
+            # News sentiment from market_data
+            news_data = market_data.get("news", {})
+            news_sentiment_str = news_data.get("overall_sentiment", "neutral")
+            news_sentiment_val = {"positive": 1.0, "neutral": 0.0, "negative": -1.0}.get(
+                news_sentiment_str, 0.0
+            )
+
+            # External signal summary
+            ext_signal = decision.external_signal or {}
+            fusion = ext_signal.get("fusion", {})
+            ext_signal_text = fusion.get("signal", "unknown") if fusion else "unknown"
+
+            # Trade params
+            tp = decision.trade_params or {}
+            buy_amount = tp.get("amount") if decision.decision == "buy" else None
+            sell_pct = None
+            if decision.decision == "sell" and tp.get("volume"):
+                sell_pct = 100.0  # full sell
+
+            # ADX regime
+            adx_regime = indicators.get("adx_regime", None)
+
+            # Price change as market trend
+            price_change = ticker.get("signed_change_rate", 0) * 100
+            if price_change > 2:
+                market_trend = "bullish"
+            elif price_change < -2:
+                market_trend = "bearish"
+            else:
+                market_trend = "sideways"
+
+            # cycle_id 생성
+            try:
+                import sys as _sys
+                _sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+                from scripts.cycle_id import get_or_create_cycle_id
+                _cycle_id = get_or_create_cycle_id("agent")
+            except Exception:
+                from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+                _cycle_id = _dt.now(_tz(_td(hours=9))).strftime("%Y%m%d-%H%M") + "-agent"
+
+            total_score = bs.get("total", 0)
+
+            row = {
+                "cycle_id": _cycle_id,
+                "agent_type": self.name,
+                "threshold": self.buy_score_threshold,
+                "fgi_score": fgi_obj.get("score", 0),
+                "fgi_value": fgi_obj.get("value"),
+                "rsi_score": rsi_obj.get("score", 0),
+                "rsi_value": rsi_obj.get("value"),
+                "sma_score": sma_obj.get("score", 0),
+                "sma_position": sma_position,
+                "news_score": news_obj.get("score", 0),
+                "news_sentiment": news_sentiment_val,
+                "external_bonus": ext_obj.get("score", 0),
+                "external_signal": ext_signal_text,
+                "total_score": total_score,
+                "action": decision.decision,
+                "buy_amount": buy_amount,
+                "sell_pct": sell_pct,
+                "confidence": round(decision.confidence, 2),
+                "reason": decision.reason,
+                "btc_price": ticker.get("trade_price"),
+                "market_trend": market_trend,
+                "adx_regime": adx_regime,
+                # 니어미스 + AI 거부권 + 감독 오버라이드 추적
+                "points_from_threshold": round(total_score - self.buy_score_threshold, 2),
+                "is_near_miss": abs(total_score - self.buy_score_threshold) <= 5,
+                "price_at_decision": int(market_data.get("current_price", 0) or ticker.get("trade_price", 0) or 0) or None,
+                "was_ai_vetoed": getattr(decision, '_was_ai_vetoed', False),
+                "ai_veto_reason": getattr(decision, '_ai_veto_reason', None),
+                "orchestrator_override": getattr(decision, '_orchestrator_override', False),
+                "override_reason": getattr(decision, '_override_reason', None),
+                "original_action": getattr(decision, '_original_action', None),
+            }
+
+            headers = {
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            }
+
+            r = requests.post(
+                f"{supabase_url}/rest/v1/buy_score_detail",
+                headers=headers,
+                json=row,
+                timeout=10,
+            )
+            if not r.ok:
+                print(
+                    f"[base_agent] buy_score_detail INSERT 실패 ({r.status_code}): {r.text[:300]}",
+                    file=sys.stderr,
+                )
+        except Exception as e:
+            print(f"[base_agent] buy_score_detail 저장 예외: {e}", file=sys.stderr)
 
     @abstractmethod
     def decide(

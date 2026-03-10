@@ -113,7 +113,7 @@ class ConservativeAgent(BaseStrategyAgent):
                     reason = (f"매수 점수 {buy_score['total']}점 충족. "
                               f"AI 시그널 음수({ai_score})이나 극단 공포(FGI {fgi}) → 매수 허용")
                 else:
-                    return Decision(
+                    d = Decision(
                         decision="hold",
                         confidence=0.5,
                         reason=f"매수 점수 {buy_score['total']}점 충족이나 AI 시그널 음수({ai_score}) → 보류",
@@ -122,6 +122,10 @@ class ConservativeAgent(BaseStrategyAgent):
                         external_signal=external_signal,
                         agent_name=f"{self.emoji} {self.name}",
                     )
+                    d._was_ai_vetoed = True
+                    d._ai_veto_reason = f"ai_signal_negative({ai_score})"
+                    d._original_action = "buy"
+                    return d
             else:
                 reason = f"매수 점수 {buy_score['total']}점 >= {self.buy_score_threshold}점 충족"
 

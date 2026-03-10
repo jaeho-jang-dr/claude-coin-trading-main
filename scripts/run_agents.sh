@@ -48,6 +48,7 @@ if [ -f "$AUTO_EMERGENCY_FILE" ]; then
 fi
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+CYCLE_ID="$(date +%Y%m%d-%H%M)-agent"
 SNAPSHOT_DIR="data/snapshots/${TIMESTAMP}"
 LOG_DIR="logs/executions"
 mkdir -p "$SNAPSHOT_DIR" "$LOG_DIR"
@@ -80,6 +81,13 @@ echo "[$(date)] Phase 2: 에이전트 파이프라인 실행..." >&2
 AGENT_RESULT=$(python3 -c "
 import json, sys, os
 sys.path.insert(0, '.')
+
+# cycle_id 설정 — 이 파이프라인의 모든 DB 기록에 사용
+try:
+    from scripts.cycle_id import set_cycle_id
+    set_cycle_id('${CYCLE_ID}')
+except Exception:
+    pass
 
 from agents.external_data import ExternalDataAgent
 from agents.orchestrator import Orchestrator
@@ -242,35 +250,137 @@ if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
   python3 -c "
 import json, os, requests, sys
 
+DECISION_MAP = {'buy': '매수', 'sell': '매도', 'hold': '관망'}
+
 result = json.loads(open('${SNAPSHOT_DIR}/agent_result.json', encoding='utf-8').read())
-decision = result['decision']
+dec = result['decision']
+market = json.loads(open('${SNAPSHOT_DIR}/market_data.json', encoding='utf-8').read())
+
+raw_decision = dec['decision']
+kr_decision = DECISION_MAP.get(raw_decision, raw_decision)
+
+agent_name = result.get('active_agent', '')
+buy_score = dec.get('buy_score', {})
+ext_summary = dec.get('external_signal_summary', {})
+
+reason_parts = [dec.get('reason', '')]
+if agent_name:
+    reason_parts.append(f'에이전트: {agent_name}')
+if buy_score:
+    reason_parts.append(f'매수점수: {buy_score.get(\"total\", \"?\")}/{buy_score.get(\"threshold\", \"?\")}')
+if ext_summary:
+    reason_parts.append(f'외부시그널: {ext_summary.get(\"fusion_signal\", \"?\")}({ext_summary.get(\"total_score\", \"?\")})')
 
 row = {
-    'decision': decision['decision'],
-    'confidence': decision.get('confidence', 0),
-    'reason': decision.get('reason', ''),
-    'buy_score': decision.get('buy_score', {}).get('total', 0),
-    'agent_name': result.get('active_agent', ''),
-    'current_price': json.loads(open('${SNAPSHOT_DIR}/market_data.json', encoding='utf-8').read()).get('ticker', {}).get('trade_price', 0),
-    'snapshot_dir': '${SNAPSHOT_DIR}',
+    'decision': kr_decision,
+    'confidence': dec.get('confidence', 0),
+    'reason': ' | '.join(reason_parts),
+    'current_price': market.get('current_price') or market.get('ticker', {}).get('trade_price', 0),
+    'rsi_value': market.get('indicators', {}).get('rsi_14'),
+    'fear_greed_value': buy_score.get('fgi', {}).get('value'),
+    'market_data_snapshot': json.dumps({
+        'buy_score': buy_score,
+        'external': ext_summary,
+        'snapshot_dir': '${SNAPSHOT_DIR}',
+    }, ensure_ascii=False),
+    'cycle_id': '${CYCLE_ID}',
+    'source': 'agent',
 }
 
-try:
-    resp = requests.post(
-        os.environ['SUPABASE_URL'] + '/rest/v1/decisions',
-        json=row,
-        headers={
-            'apikey': os.environ['SUPABASE_SERVICE_ROLE_KEY'],
-            'Authorization': 'Bearer ' + os.environ['SUPABASE_SERVICE_ROLE_KEY'],
-            'Content-Type': 'application/json',
-            'Prefer': 'return=minimal',
-        },
-        timeout=10,
-    )
+resp = requests.post(
+    os.environ['SUPABASE_URL'] + '/rest/v1/decisions',
+    json=row,
+    headers={
+        'apikey': os.environ['SUPABASE_SERVICE_ROLE_KEY'],
+        'Authorization': 'Bearer ' + os.environ['SUPABASE_SERVICE_ROLE_KEY'],
+        'Content-Type': 'application/json',
+        'Prefer': 'return=minimal',
+    },
+    timeout=10,
+)
+if resp.status_code in (200, 201):
     print(f'[Agent] Supabase 기록 완료 (HTTP {resp.status_code})', file=sys.stderr)
+else:
+    print(f'[Agent] Supabase 기록 실패! HTTP {resp.status_code}: {resp.text}', file=sys.stderr)
+" 2>&1 >&2 || true
+fi
+
+# ── Phase 5b: market_data 기록 ──
+if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
+  echo "[$(date)] Phase 5b: market_data + execution_logs 기록..." >&2
+  python3 -c "
+import json, os, time, requests, sys
+
+supabase_url = os.environ['SUPABASE_URL']
+supabase_key = os.environ['SUPABASE_SERVICE_ROLE_KEY']
+headers = {
+    'apikey': supabase_key,
+    'Authorization': f'Bearer {supabase_key}',
+    'Content-Type': 'application/json',
+    'Prefer': 'return=minimal',
+}
+
+# market_data 저장
+try:
+    market = json.loads(open('${SNAPSHOT_DIR}/market_data.json', encoding='utf-8').read())
+    ticker = market.get('ticker', {})
+    indicators = market.get('indicators', {})
+    result = json.loads(open('${SNAPSHOT_DIR}/agent_result.json', encoding='utf-8').read())
+    fgi = market.get('fear_greed', result.get('decision', {}).get('buy_score', {}).get('fgi', {}))
+    news = market.get('news', {})
+
+    price = ticker.get('trade_price') or market.get('current_price', 0)
+    row = {
+        'market': 'KRW-BTC',
+        'price': int(price) if price else 0,
+        'volume_24h': float(ticker.get('acc_trade_volume_24h', 0)) if ticker.get('acc_trade_volume_24h') else None,
+        'change_rate_24h': float(ticker.get('signed_change_rate', 0)) if ticker.get('signed_change_rate') else None,
+        'fear_greed_value': fgi.get('value') if isinstance(fgi, dict) else None,
+        'fear_greed_class': fgi.get('value_classification') if isinstance(fgi, dict) else None,
+        'rsi_14': indicators.get('rsi_14'),
+        'sma_20': int(indicators.get('sma_20')) if indicators.get('sma_20') else None,
+        'news_sentiment': news.get('overall_sentiment', 'neutral'),
+        'cycle_id': '${CYCLE_ID}',
+    }
+    resp = requests.post(f'{supabase_url}/rest/v1/market_data', json=row, headers=headers, timeout=10)
+    if resp.status_code in (200, 201):
+        print('[Agent] market_data 기록 완료', file=sys.stderr)
+    else:
+        print(f'[Agent] market_data 기록 실패: HTTP {resp.status_code}: {resp.text[:200]}', file=sys.stderr)
 except Exception as e:
-    print(f'[Agent] Supabase 기록 실패: {e}', file=sys.stderr)
-" 2>&2 || true
+    print(f'[Agent] market_data 기록 예외: {e}', file=sys.stderr)
+
+# execution_logs 저장
+try:
+    dry_run = os.environ.get('DRY_RUN', 'true').lower() == 'true'
+    decision = result.get('decision', {}).get('decision', 'hold')
+    if decision in ('buy', 'sell') and not dry_run:
+        exec_mode = 'execute'
+    elif decision in ('buy', 'sell') and dry_run:
+        exec_mode = 'dry_run'
+    else:
+        exec_mode = 'analyze'
+
+    log_row = {
+        'execution_mode': exec_mode,
+        'duration_ms': int(float('${SECONDS:-0}') * 1000) if '${SECONDS:-0}' != '0' else None,
+        'data_sources': json.dumps({
+            'sources': ['market_data', 'portfolio', 'ai_signal', 'external_data'],
+            'agent': result.get('active_agent', ''),
+            'decision': decision,
+            'snapshot_dir': '${SNAPSHOT_DIR}',
+        }, ensure_ascii=False),
+        'raw_output': json.dumps(result, ensure_ascii=False)[:10000],
+        'cycle_id': '${CYCLE_ID}',
+    }
+    resp = requests.post(f'{supabase_url}/rest/v1/execution_logs', json=log_row, headers=headers, timeout=10)
+    if resp.status_code in (200, 201):
+        print('[Agent] execution_logs 기록 완료', file=sys.stderr)
+    else:
+        print(f'[Agent] execution_logs 기록 실패: HTTP {resp.status_code}: {resp.text[:200]}', file=sys.stderr)
+except Exception as e:
+    print(f'[Agent] execution_logs 기록 예외: {e}', file=sys.stderr)
+" 2>&1 >&2 || true
 fi
 
 # ── Phase 6: 과거 전환 성과 평가 (학습 데이터 축적) ──

@@ -202,7 +202,7 @@ class TestSaveDecision:
             "buy_score": {"fgi": {"value": 25}, "rsi": {"value": 30}, "total": 75},
         }
         sd.save_decision(data)
-        row = mock_post.call_args[0][1]
+        row = mock_post.call_args_list[0][0][1]
         assert row["confidence"] == 0.85
 
     @patch("save_decision.supabase_post")
@@ -214,7 +214,7 @@ class TestSaveDecision:
             "buy_score": {},
         }
         sd.save_decision(data)
-        row = mock_post.call_args[0][1]
+        row = mock_post.call_args_list[0][0][1]
         assert row["confidence"] == 0.85
 
     @patch("save_decision.supabase_post")
@@ -222,7 +222,7 @@ class TestSaveDecision:
         mock_post.return_value = {"id": "123"}
         data = {"decision": "hold", "confidence": 0, "buy_score": {}}
         sd.save_decision(data)
-        row = mock_post.call_args[0][1]
+        row = mock_post.call_args_list[0][0][1]
         assert row["confidence"] == 0.0
 
     @patch("save_decision.supabase_post")
@@ -238,7 +238,7 @@ class TestSaveDecision:
             },
         }
         sd.save_decision(data)
-        row = mock_post.call_args[0][1]
+        row = mock_post.call_args_list[0][0][1]
         assert row["fear_greed_value"] == 22
         assert row["rsi_value"] == 28
 
@@ -247,7 +247,7 @@ class TestSaveDecision:
         mock_post.return_value = {"id": "123"}
         data = {"decision": "buy", "confidence": 50, "buy_score": {}}
         sd.save_decision(data)
-        row = mock_post.call_args[0][1]
+        row = mock_post.call_args_list[0][0][1]
         assert row["decision"] == "매수"
 
     @patch("save_decision.supabase_post")
@@ -255,7 +255,7 @@ class TestSaveDecision:
         mock_post.return_value = {"id": "123"}
         data = {"decision": "hold", "buy_score": {}}
         sd.save_decision(data)
-        row = mock_post.call_args[0][1]
+        row = mock_post.call_args_list[0][0][1]
         assert row["market"] == "KRW-BTC"
 
     @patch("save_decision.supabase_post")
@@ -268,7 +268,7 @@ class TestSaveDecision:
             "trade_details": {"amount": 100000},
         }
         sd.save_decision(data)
-        row = mock_post.call_args[0][1]
+        row = mock_post.call_args_list[0][0][1]
         assert row["trade_amount"] == 100000
 
     @patch("save_decision.supabase_post")
@@ -281,7 +281,7 @@ class TestSaveDecision:
             "trade_amount": 50000,
         }
         sd.save_decision(data)
-        row = mock_post.call_args[0][1]
+        row = mock_post.call_args_list[0][0][1]
         assert row["trade_amount"] == 50000
 
     @patch("save_decision.supabase_post")
@@ -289,7 +289,7 @@ class TestSaveDecision:
         mock_post.return_value = {"id": "123"}
         data = {"decision": "buy", "confidence": 90, "buy_score": {}, "executed": True}
         sd.save_decision(data)
-        row = mock_post.call_args[0][1]
+        row = mock_post.call_args_list[0][0][1]
         assert row["executed"] is True
 
     @patch("save_decision.supabase_post")
@@ -297,7 +297,7 @@ class TestSaveDecision:
         mock_post.return_value = {"id": "123"}
         data = {"decision": "buy", "confidence": 90, "buy_score": {}, "trade_executed": True}
         sd.save_decision(data)
-        row = mock_post.call_args[0][1]
+        row = mock_post.call_args_list[0][0][1]
         assert row["executed"] is True
 
     @patch("save_decision.supabase_post")
@@ -309,7 +309,7 @@ class TestSaveDecision:
             "ai_composite_signal": {"score": 0.6},
         }
         sd.save_decision(data)
-        row = mock_post.call_args[0][1]
+        row = mock_post.call_args_list[0][0][1]
         snapshot = json.loads(row["market_data_snapshot"])
         assert snapshot["buy_score"]["total"] == 40
         assert snapshot["ai_composite_signal"]["score"] == 0.6
@@ -319,7 +319,7 @@ class TestSaveDecision:
         mock_post.return_value = {"id": "123"}
         data = {"decision": "hold", "buy_score": {}}
         sd.save_decision(data)
-        assert mock_post.call_args[0][0] == "decisions"
+        assert mock_post.call_args_list[0][0][0] == "decisions"
 
     @patch("save_decision.supabase_post")
     def test_returns_none_on_failure(self, mock_post):
@@ -338,7 +338,7 @@ class TestSaveDecision:
             "buy_score": {"fgi": 25, "rsi": 30},
         }
         sd.save_decision(data)
-        row = mock_post.call_args[0][1]
+        row = mock_post.call_args_list[0][0][1]
         assert row["fear_greed_value"] is None
         assert row["rsi_value"] is None
 

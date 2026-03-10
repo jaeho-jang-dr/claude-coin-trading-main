@@ -19,12 +19,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+import requests
 
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -285,6 +288,17 @@ class ExternalDataAgent:
     def __init__(self, snapshot_dir: Path | None = None):
         self.snapshot_dir = snapshot_dir
 
+    def _get_cycle_id(self) -> str:
+        """cycle_id를 반환한다. 실패 시 인라인 생성."""
+        try:
+            sys.path.insert(0, str(PROJECT_DIR))
+            from scripts.cycle_id import get_or_create_cycle_id
+            return get_or_create_cycle_id("agent")
+        except Exception:
+            from datetime import datetime, timezone, timedelta
+            _KST = timezone(timedelta(hours=9))
+            return datetime.now(_KST).strftime("%Y%m%d-%H%M") + "-agent"
+
     def collect_all(self) -> dict:
         """모든 외부 데이터를 병렬 수집한다."""
         tasks = {
@@ -341,7 +355,7 @@ class ExternalDataAgent:
         # Data Fusion 종합
         external_signal = self._calculate_fusion(results)
 
-        return {
+        collected = {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S+09:00"),
             "collection_time_sec": elapsed,
             "sources": results,
@@ -349,6 +363,14 @@ class ExternalDataAgent:
             "errors": [name for name, d in results.items()
                        if isinstance(d, dict) and "error" in d],
         }
+
+        # DB에 외부 시그널 기록
+        try:
+            self._save_signal_to_db(collected, external_signal)
+        except Exception as e:
+            logging.warning(f"external_signal_log DB 저장 중 예외: {e}")
+
+        return collected
 
     def _calculate_fusion(self, results: dict) -> dict:
         """수집된 데이터로 Data Fusion 종합 점수를 산출한다."""
@@ -553,6 +575,133 @@ class ExternalDataAgent:
             "strategy_bonus": bonus,
             "fusion": {"signal": "neutral", "note": "인라인 간이 계산"},
         }
+
+    def _save_signal_to_db(self, results: dict, external_signal: dict) -> None:
+        """외부 시그널 데이터를 Supabase external_signal_log 테이블에 저장한다."""
+        url = os.getenv("SUPABASE_URL", "")
+        key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+        if not url or not key:
+            logging.warning("Supabase 환경변수 미설정 — external_signal_log 저장 건너뜀")
+            return
+
+        sources = results.get("sources", {})
+
+        # -- Binance Futures --
+        bs = sources.get("binance_sentiment", {})
+        bs_sent = bs.get("sentiment_score", {})
+        binance_score = bs_sent.get("score", None) if isinstance(bs_sent, dict) else None
+        ls_ratio = bs.get("long_short_ratio", {}).get("ratio", None) if isinstance(bs.get("long_short_ratio"), dict) else None
+        funding_rate = bs.get("funding_rate", {}).get("rate", None) if isinstance(bs.get("funding_rate"), dict) else None
+        oi_change = bs.get("open_interest", {}).get("change_pct", None) if isinstance(bs.get("open_interest"), dict) else None
+        kimchi_pct = bs.get("kimchi_premium", {}).get("premium_pct", None) if isinstance(bs.get("kimchi_premium"), dict) else None
+
+        # -- Whale / On-chain --
+        wt = sources.get("whale_tracker", {})
+        ws_obj = wt.get("whale_score", {})
+        whale_score = ws_obj.get("score", None) if isinstance(ws_obj, dict) else None
+        whale_flow = ws_obj.get("flow", None) if isinstance(ws_obj, dict) else None
+        large_tx_count = wt.get("large_transactions", {}).get("count", None) if isinstance(wt.get("large_transactions"), dict) else None
+        ex_flow = wt.get("exchange_flow", {})
+        exchange_inflow = ex_flow.get("inflow", None) if isinstance(ex_flow, dict) else None
+        exchange_outflow = ex_flow.get("outflow", None) if isinstance(ex_flow, dict) else None
+
+        # -- Macro --
+        macro_data = sources.get("macro", {}).get("analysis", {})
+        macro_score = macro_data.get("macro_score", None)
+        sp500 = macro_data.get("sp500_change", None)
+        dxy = macro_data.get("dxy_change", None)
+        gold = macro_data.get("gold_change", None)
+        us10y = macro_data.get("us10y_change", None)
+
+        # -- FGI --
+        fg = sources.get("fear_greed", {})
+        fg_current = fg.get("current", {})
+        fgi_value = int(fg_current.get("value", 0)) if fg_current.get("value") is not None else None
+        fgi_class = fg_current.get("value_classification", None)
+
+        # -- News --
+        ns = sources.get("news_sentiment", {})
+        news_sentiment = ns.get("sentiment_score", None)
+        news_count = ns.get("total_articles", None)
+        # news_score from fusion extra_components
+        ext_sig = external_signal
+        news_score_val = ext_sig.get("extra_components", {}).get("news_sentiment", {}).get("score", None)
+
+        # -- ETH/BTC --
+        eth = sources.get("eth_btc", {})
+        eth_btc_ratio = eth.get("eth_btc_ratio", None)
+        eth_btc_z = eth.get("eth_btc_z_score", None)
+        eth_btc_score = ext_sig.get("extra_components", {}).get("eth_btc", {}).get("score", None)
+        eth_btc_trend = eth.get("trend", None)
+
+        # -- CoinGecko --
+        cs = sources.get("crypto_signals", {}) or {}
+        btc_sig = cs.get("btc") or {}
+        coingecko_score_val = ext_sig.get("extra_components", {}).get("crypto_signals", {}).get("score", None)
+        volume_anomaly = btc_sig.get("anomaly_level", "LOW") in ("HIGH", "CRITICAL", "MODERATE") if btc_sig else None
+        volume_change_pct = btc_sig.get("change_24h", None) if btc_sig else None
+
+        # -- Fusion --
+        fusion_score = ext_sig.get("total_score", None)
+        fusion_obj = ext_sig.get("fusion", {})
+        fusion_signal = fusion_obj.get("signal", None) if isinstance(fusion_obj, dict) else None
+        fusion_details = ext_sig  # store entire fusion result as JSONB
+
+        row = {
+            "binance_score": binance_score,
+            "long_short_ratio": ls_ratio,
+            "funding_rate": funding_rate,
+            "open_interest_change": oi_change,
+            "whale_score": whale_score,
+            "whale_flow": whale_flow,
+            "large_tx_count": large_tx_count,
+            "exchange_inflow": exchange_inflow,
+            "exchange_outflow": exchange_outflow,
+            "macro_score": macro_score,
+            "sp500_change": sp500,
+            "dxy_change": dxy,
+            "gold_change": gold,
+            "us10y_change": us10y,
+            "fgi_value": fgi_value,
+            "fgi_classification": fgi_class,
+            "news_sentiment": news_sentiment,
+            "news_score": news_score_val,
+            "news_count": news_count,
+            "eth_btc_ratio": eth_btc_ratio,
+            "eth_btc_score": eth_btc_score,
+            "eth_btc_trend": eth_btc_trend,
+            "coingecko_score": coingecko_score_val,
+            "volume_anomaly": volume_anomaly,
+            "volume_change_pct": volume_change_pct,
+            "kimchi_premium_pct": kimchi_pct,
+            "fusion_score": fusion_score,
+            "fusion_signal": fusion_signal,
+            "fusion_details": json.dumps(fusion_details, ensure_ascii=False) if fusion_details else None,
+            "source": "agent",
+            "cycle_id": self._get_cycle_id(),
+        }
+
+        # None 값 제거 (Supabase가 DEFAULT 처리하도록)
+        row = {k: v for k, v in row.items() if v is not None}
+
+        try:
+            resp = requests.post(
+                f"{url}/rest/v1/external_signal_log",
+                json=row,
+                headers={
+                    "apikey": key,
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal",
+                },
+                timeout=10,
+            )
+            if resp.status_code in (200, 201):
+                logging.info("external_signal_log 저장 완료")
+            else:
+                logging.warning(f"external_signal_log 저장 실패: {resp.status_code} {resp.text[:200]}")
+        except Exception as e:
+            logging.warning(f"external_signal_log 저장 오류: {e}")
 
     def get_fgi_value(self, results: dict) -> int:
         fg = results.get("sources", {}).get("fear_greed", {})

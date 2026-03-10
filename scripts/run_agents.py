@@ -27,6 +27,14 @@ from agents.orchestrator import Orchestrator
 
 KST = timezone(timedelta(hours=9))
 
+# cycle_id: 이 파이프라인 실행의 모든 DB 기록을 연결하는 키
+try:
+    from scripts.cycle_id import make_cycle_id, set_cycle_id
+    _CYCLE_ID = make_cycle_id("agent")
+    set_cycle_id(_CYCLE_ID)
+except Exception:
+    _CYCLE_ID = datetime.now(KST).strftime("%Y%m%d-%H%M") + "-agent"
+
 
 def log(msg: str):
     print(f"[{datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}] {msg}", file=sys.stderr)
@@ -85,9 +93,125 @@ async def collect_internal_data() -> tuple[dict, dict, dict]:
     return market_data, portfolio, ai_signal
 
 
+def supabase_headers() -> dict:
+    """Supabase REST API 공통 헤더"""
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    return {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal",
+    }
+
+
+def save_execution_log(
+    execution_mode: str,
+    duration_ms: int,
+    data_sources: dict | None = None,
+    errors: dict | None = None,
+    raw_output: str | None = None,
+    decision_id: str | None = None,
+) -> bool:
+    """execution_logs 테이블에 파이프라인 실행 기록을 저장한다."""
+    supabase_url = os.environ.get("SUPABASE_URL", "")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    if not supabase_url or not supabase_key:
+        log("execution_logs 저장 스킵: Supabase 미설정")
+        return False
+
+    row = {
+        "execution_mode": execution_mode,
+        "duration_ms": duration_ms,
+        "data_sources": json.dumps(data_sources or {}, ensure_ascii=False),
+        "errors": json.dumps(errors or {}, ensure_ascii=False),
+        "cycle_id": _CYCLE_ID,
+    }
+    if raw_output:
+        row["raw_output"] = raw_output[:10000]  # 10KB 제한
+    if decision_id:
+        row["decision_id"] = decision_id
+
+    try:
+        resp = requests.post(
+            f"{supabase_url}/rest/v1/execution_logs",
+            json=row,
+            headers=supabase_headers(),
+            timeout=10,
+        )
+        if resp.status_code in (200, 201):
+            log("execution_logs 기록 완료")
+            return True
+        else:
+            log(f"execution_logs 기록 실패 (HTTP {resp.status_code}): {resp.text[:300]}")
+            return False
+    except Exception as e:
+        log(f"execution_logs 기록 예외: {e}")
+        return False
+
+
+def save_market_data_record(market_data: dict, external_data: dict) -> bool:
+    """market_data 테이블에 시장 데이터 스냅샷을 저장한다.
+
+    모든 수집된 지표를 포함:
+    - 가격, 거래량, 변화율
+    - RSI, SMA20 기술지표
+    - FGI 값/분류
+    - 뉴스 감성 점수
+    """
+    supabase_url = os.environ.get("SUPABASE_URL", "")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    if not supabase_url or not supabase_key:
+        log("market_data 저장 스킵: Supabase 미설정")
+        return False
+
+    ticker = market_data.get("ticker", {})
+    indicators = market_data.get("indicators", {})
+    fgi = market_data.get("fear_greed", {})
+    news = market_data.get("news", {})
+
+    price = ticker.get("trade_price") or market_data.get("current_price", 0)
+    volume_24h = ticker.get("acc_trade_volume_24h")
+    change_rate = ticker.get("signed_change_rate")
+
+    row = {
+        "market": "KRW-BTC",
+        "price": int(price) if price else 0,
+        "volume_24h": float(volume_24h) if volume_24h else None,
+        "change_rate_24h": float(change_rate) if change_rate else None,
+        "fear_greed_value": fgi.get("value"),
+        "fear_greed_class": fgi.get("value_classification"),
+        "rsi_14": indicators.get("rsi_14"),
+        "sma_20": int(indicators.get("sma_20")) if indicators.get("sma_20") else None,
+        "news_sentiment": news.get("overall_sentiment", "neutral"),
+        "cycle_id": _CYCLE_ID,
+    }
+
+    try:
+        resp = requests.post(
+            f"{supabase_url}/rest/v1/market_data",
+            json=row,
+            headers=supabase_headers(),
+            timeout=10,
+        )
+        if resp.status_code in (200, 201):
+            log("market_data 기록 완료")
+            return True
+        else:
+            log(f"market_data 기록 실패 (HTTP {resp.status_code}): {resp.text[:300]}")
+            return False
+    except Exception as e:
+        log(f"market_data 기록 예외: {e}")
+        return False
+
+
 def main():
     load_dotenv(PROJECT_DIR / ".env")
-    
+
+    # 파이프라인 시작 시간 기록
+    pipeline_start = time.time()
+    pipeline_errors = []
+    data_sources_used = []
+
     # 1. 수동 긴급 정지 확인
     if os.environ.get("EMERGENCY_STOP", "false").lower() == "true":
         log("[STOP] 사용자 EMERGENCY_STOP 활성화됨. 실행 중단.")
@@ -114,9 +238,23 @@ def main():
     log_dir.mkdir(parents=True, exist_ok=True)
     
     log("═══ Python 에이전트 모드 시작 ═══")
-    
+
     # Phase 1
     market_data, portfolio, ai_signal = asyncio.run(collect_internal_data())
+
+    # 데이터 소스 추적
+    if "error" not in market_data:
+        data_sources_used.append("market_data")
+    else:
+        pipeline_errors.append({"phase": "phase1", "source": "market_data", "error": market_data.get("error")})
+    if "error" not in portfolio:
+        data_sources_used.append("portfolio")
+    else:
+        pipeline_errors.append({"phase": "phase1", "source": "portfolio", "error": portfolio.get("error")})
+    if "error" not in ai_signal:
+        data_sources_used.append("ai_signal")
+    else:
+        pipeline_errors.append({"phase": "phase1", "source": "ai_signal", "error": ai_signal.get("error")})
     
     with open(snapshot_dir / "market_data.json", "w", encoding="utf-8") as f:
         json.dump(market_data, f, ensure_ascii=False)
@@ -132,6 +270,10 @@ def main():
         ext_agent = ExternalDataAgent(snapshot_dir=snapshot_dir)
         external_data = ext_agent.collect_all()
         log(f"외부 데이터 수집 완료 ({external_data.get('collection_time_sec', 0)}초)")
+        data_sources_used.append("external_data")
+        ext_errors = external_data.get("errors", [])
+        if ext_errors:
+            pipeline_errors.append({"phase": "phase2", "source": "external_data", "errors": ext_errors})
         
         # 데이터 병합
         market_data["ai_composite_signal"] = ai_signal.get("ai_composite_signal", ai_signal.get("composite_signal", {}))
@@ -196,6 +338,15 @@ def main():
         log(f"Phase 2 실패: {e}")
         import traceback
         traceback.print_exc()
+        pipeline_errors.append({"phase": "phase2", "source": "orchestrator", "error": str(e)})
+        # 실패해도 execution_logs는 기록
+        duration_ms = int((time.time() - pipeline_start) * 1000)
+        save_execution_log(
+            execution_mode="dry_run" if os.environ.get("DRY_RUN", "true").lower() == "true" else "execute",
+            duration_ms=duration_ms,
+            data_sources={"sources": data_sources_used, "phases_completed": ["phase1"]},
+            errors={"pipeline_errors": pipeline_errors, "fatal": str(e)},
+        )
         notify_error("Agent Pipeline", f"에이전트 파이프라인 실패: {e}")
         sys.exit(1)
         
@@ -280,34 +431,127 @@ def main():
     except Exception:
         pass
         
-    # Phase 5: Supabase 기록
+    # Phase 5: Supabase 기록 (decisions + market_data + execution_logs)
     if supabase_url and supabase_key:
         log("Phase 5: Supabase 기록...")
+
+        # 5a. decisions 테이블
         try:
-            row = {
-                "decision": decision,
-                "confidence": output["decision"].get("confidence", 0),
-                "reason": output["decision"].get("reason", ""),
-                "buy_score": output["decision"].get("buy_score", {}).get("total", 0),
-                "agent_name": agent_name,
-                "current_price": market_data.get("ticker", {}).get("trade_price", 0),
-                "snapshot_dir": str(snapshot_dir),
+            DECISION_MAP = {"buy": "매수", "sell": "매도", "hold": "관망"}
+            dec = output["decision"]
+            buy_score = dec.get("buy_score", {})
+            ext_summary = dec.get("external_signal_summary", {})
+
+            reason_parts = [dec.get("reason", "")]
+            if agent_name:
+                reason_parts.append(f"에이전트: {agent_name}")
+            if buy_score:
+                reason_parts.append(f"매수점수: {buy_score.get('total', '?')}/{buy_score.get('threshold', '?')}")
+            if ext_summary:
+                reason_parts.append(f"외부시그널: {ext_summary.get('fusion_signal', '?')}({ext_summary.get('total_score', '?')})")
+
+            raw_conf = float(dec.get("confidence", 0))
+            confidence_val = raw_conf / 100.0 if raw_conf > 1 else raw_conf
+
+            decision_row = {
+                "market": "KRW-BTC",
+                "decision": DECISION_MAP.get(decision, decision),
+                "confidence": round(confidence_val, 2),
+                "reason": " | ".join(reason_parts),
+                "current_price": int(market_data.get("ticker", {}).get("trade_price", 0)) or None,
+                "rsi_value": market_data.get("indicators", {}).get("rsi_14"),
+                "fear_greed_value": market_data.get("fear_greed", {}).get("value"),
+                "sma20_price": int(market_data.get("indicators", {}).get("sma_20")) if market_data.get("indicators", {}).get("sma_20") else None,
+                "market_data_snapshot": json.dumps({
+                    "buy_score": buy_score,
+                    "external": ext_summary,
+                    "snapshot_dir": str(snapshot_dir),
+                }, ensure_ascii=False),
+                "cycle_id": _CYCLE_ID,
+                "source": "agent",
             }
-            requests.post(
+            decision_headers = supabase_headers()
+            decision_headers["Prefer"] = "return=representation"
+            resp = requests.post(
                 f"{supabase_url}/rest/v1/decisions",
-                json=row,
-                headers={
-                    "apikey": supabase_key,
-                    "Authorization": f"Bearer {supabase_key}",
-                    "Content-Type": "application/json",
-                    "Prefer": "return=minimal",
-                },
-                timeout=5,
+                json=decision_row,
+                headers=decision_headers,
+                timeout=10,
             )
-            log("Supabase 기록 완료")
+            if resp.status_code in (200, 201):
+                log("decisions 기록 완료")
+            else:
+                log(f"decisions 기록 실패 (HTTP {resp.status_code}): {resp.text[:300]}")
+                pipeline_errors.append({"phase": "phase5", "source": "decisions", "error": resp.text[:300]})
         except Exception as e:
-            log(f"Supabase 기록 실패: {e}")
-            
+            log(f"decisions 기록 예외: {e}")
+            pipeline_errors.append({"phase": "phase5", "source": "decisions", "error": str(e)})
+
+        # 5a-2. market_context_log 테이블 (결정 시점 전체 시장 스냅샷)
+        try:
+            decision_id = None
+            if resp.ok:
+                try:
+                    resp_data = resp.json()
+                    if isinstance(resp_data, list) and len(resp_data) > 0:
+                        decision_id = resp_data[0].get("id")
+                    elif isinstance(resp_data, dict):
+                        decision_id = resp_data.get("id")
+                except Exception:
+                    pass
+
+            from scripts.save_decision import save_market_context
+            market_state = result.get("market_state", {})
+            save_market_context(
+                decision_id=decision_id,
+                market_data=market_data,
+                external_data=external_data,
+                portfolio=portfolio,
+                agent_state={
+                    "active_agent": agent_name,
+                    "danger_score": market_state.get("danger_score"),
+                    "opportunity_score": market_state.get("opportunity_score"),
+                },
+            )
+            log("market_context_log 기록 완료")
+        except Exception as e:
+            log(f"market_context_log 기록 예외: {e}")
+            pipeline_errors.append({"phase": "phase5", "source": "market_context_log", "error": str(e)})
+
+        # 5b. market_data 테이블
+        try:
+            save_market_data_record(market_data, external_data)
+        except Exception as e:
+            log(f"market_data 기록 예외: {e}")
+            pipeline_errors.append({"phase": "phase5", "source": "market_data", "error": str(e)})
+
+        # 5c. execution_logs 테이블
+        try:
+            duration_ms = int((time.time() - pipeline_start) * 1000)
+            dry_run = os.environ.get("DRY_RUN", "true").lower() == "true"
+            if decision in ("buy", "sell") and not dry_run:
+                exec_mode = "execute"
+            elif decision in ("buy", "sell") and dry_run:
+                exec_mode = "dry_run"
+            else:
+                exec_mode = "analyze"
+
+            save_execution_log(
+                execution_mode=exec_mode,
+                duration_ms=duration_ms,
+                data_sources={
+                    "sources": data_sources_used,
+                    "phases_completed": ["phase1", "phase2", "phase3", "phase4", "phase5"],
+                    "agent": agent_name,
+                    "decision": decision,
+                    "snapshot_dir": str(snapshot_dir),
+                },
+                errors={"pipeline_errors": pipeline_errors} if pipeline_errors else None,
+                raw_output=json.dumps(output, ensure_ascii=False)[:10000],
+            )
+        except Exception as e:
+            log(f"execution_logs 기록 예외: {e}")
+
     # Phase 6: 전환 성과 평가
     log("Phase 6: 전환 성과 평가...")
     subprocess.run([sys.executable, "scripts/evaluate_switches.py"], cwd=str(PROJECT_DIR), check=False)

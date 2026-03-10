@@ -104,7 +104,7 @@ class ModerateAgent(BaseStrategyAgent):
         # 매수 판단
         if buy_score["result"] == "buy":
             if ai_score < 0 and fgi > 20:
-                return Decision(
+                d = Decision(
                     decision="hold",
                     confidence=0.5,
                     reason=f"매수 점수 {buy_score['total']}점 충족이나 AI 시그널 음수({ai_score}) → 보류",
@@ -113,6 +113,10 @@ class ModerateAgent(BaseStrategyAgent):
                     external_signal=external_signal,
                     agent_name=f"{self.emoji} {self.name}",
                 )
+                d._was_ai_vetoed = True
+                d._ai_veto_reason = f"ai_signal_negative({ai_score})"
+                d._original_action = "buy"
+                return d
 
             total_krw = portfolio.get("krw_balance", 0)
             amount = self._calculate_trade_amount(total_krw, external_bonus)

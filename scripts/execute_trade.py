@@ -211,7 +211,7 @@ def execute(side: str, market: str, amount: str):
     try:
         # 5) 수정주문 / 미체결 주문 처리 (수정주문 lock 관리)
         check_open_orders_and_cancel(market, side)
-        
+
         body = {"market": market, "side": side}
         if side == "bid":
             body["ord_type"] = "price"  # 시장가 매수
@@ -223,7 +223,11 @@ def execute(side: str, market: str, amount: str):
         qs = urlencode(body)
         headers = make_auth_header(qs)
 
+        exec_started = datetime.now(KST)
         r = requests.post(f"{UPBIT_API}/orders", json=body, headers=headers, timeout=10)
+        exec_completed = datetime.now(KST)
+        latency_ms = int((exec_completed - exec_started).total_seconds() * 1000)
+
         try:
             response = r.json()
         except (ValueError, requests.exceptions.JSONDecodeError):
@@ -245,8 +249,12 @@ def execute(side: str, market: str, amount: str):
             "response": response,
             "error": error_msg,
             "timestamp": ts,
+            "_exec_started": exec_started.isoformat(),
+            "_exec_completed": exec_completed.isoformat(),
+            "_latency_ms": latency_ms,
         }
     except requests.exceptions.RequestException as e:
+        exec_completed = datetime.now(KST)
         return {
             "success": False,
             "dry_run": False,
@@ -255,9 +263,83 @@ def execute(side: str, market: str, amount: str):
             "amount": amount,
             "error": f"주문 요청 실패: {e}",
             "timestamp": ts,
+            "_exec_started": exec_started.isoformat() if 'exec_started' in dir() else None,
+            "_exec_completed": exec_completed.isoformat(),
+            "_latency_ms": None,
         }
     finally:
         release_lock()
+
+
+def _record_trade_to_db(result: dict, source: str = "manual"):
+    """매매 결과를 DB에 기록 (수동 매매 포함 모든 경로)"""
+    try:
+        url = os.environ.get("SUPABASE_URL", "")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+        if not url or not key:
+            return
+
+        headers = {
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        }
+
+        # decisions 테이블에 기록
+        side = result.get("side", "")
+        action = "buy" if side == "bid" else "sell" if side == "ask" else "hold"
+        dry_run = result.get("dry_run", True)
+
+        # cycle_id 생성
+        try:
+            sys.path.insert(0, str(PROJECT_DIR))
+            from scripts.cycle_id import make_cycle_id
+            _cycle_id = make_cycle_id(source)
+        except Exception:
+            _cycle_id = datetime.now(KST).strftime("%Y%m%d-%H%M") + f"-{source}"
+
+        decision_row = {
+            "action": action,
+            "reason": f"[{source}] {result.get('market', 'KRW-BTC')} {result.get('amount', '')}",
+            "confidence": 1.0 if source == "manual" else 0.5,
+            "market": result.get("market", "KRW-BTC"),
+            "execution_status": "success" if result.get("success") else "failed",
+            "execution_error": result.get("error"),
+            "dry_run": dry_run,
+            "cycle_id": _cycle_id,
+            "source": source,
+        }
+
+        # 실행 추적 필드 추가
+        if result.get("_exec_started"):
+            decision_row["execution_attempted"] = True
+            decision_row["execution_started_at"] = result.get("_exec_started")
+            decision_row["execution_completed_at"] = result.get("_exec_completed")
+            decision_row["execution_latency_ms"] = result.get("_latency_ms")
+        elif not result.get("dry_run"):
+            decision_row["execution_attempted"] = False
+
+        # 체결 정보 추가
+        resp = result.get("response", {})
+        if isinstance(resp, dict) and resp.get("uuid"):
+            decision_row["order_uuid"] = resp["uuid"]
+            decision_row["executed_price"] = int(float(resp.get("price", 0) or 0)) or None
+            decision_row["executed_volume"] = float(resp.get("volume", 0) or 0) or None
+
+        r = requests.post(
+            f"{url}/rest/v1/decisions",
+            json=decision_row,
+            headers=headers,
+            timeout=10,
+        )
+        if r.ok:
+            print(f"[DB] 매매 기록 저장 완료 (source={source})", file=sys.stderr)
+        else:
+            print(f"[DB] 매매 기록 저장 실패: {r.status_code} {r.text[:200]}", file=sys.stderr)
+
+    except Exception as e:
+        print(f"[DB] 매매 기록 저장 오류: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":
@@ -270,6 +352,9 @@ if __name__ == "__main__":
 
     result = execute(sys.argv[1], sys.argv[2], sys.argv[3])
     print(json.dumps(result, indent=2, ensure_ascii=False))
+
+    # 수동 실행 시에도 DB에 기록
+    _record_trade_to_db(result, source="manual")
 
     if not result["success"]:
         sys.exit(1)

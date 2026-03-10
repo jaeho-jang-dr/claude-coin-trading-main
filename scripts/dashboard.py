@@ -393,6 +393,55 @@ def api_toggle(key):
     return jsonify({"message": f"{label}: {new_val}", "value": new_val})
 
 
+@app.route("/api/rc-health")
+def api_rc_health():
+    """Remote Control 건강 상태 (watchdog v4)"""
+    health_file = PROJECT_ROOT / "data" / ".rc_health.json"
+    url_file = PROJECT_ROOT / "data" / "remote_url.txt"
+    keepalive_file = PROJECT_ROOT / "data" / ".rc_keepalive_ts"
+    fail_file = PROJECT_ROOT / "data" / ".rc_fail_count"
+
+    result = {
+        "status": "unknown",
+        "detail": "",
+        "url": "",
+        "last_keepalive": None,
+        "keepalive_age_sec": None,
+        "fail_count": 0,
+        "ts": "",
+    }
+
+    try:
+        if health_file.exists():
+            import json as _json
+            result.update(_json.loads(health_file.read_text()))
+    except Exception:
+        pass
+
+    try:
+        if url_file.exists():
+            result["url"] = url_file.read_text().strip()
+    except Exception:
+        pass
+
+    try:
+        if keepalive_file.exists():
+            import time
+            last_ts = int(keepalive_file.read_text().strip())
+            result["last_keepalive"] = last_ts
+            result["keepalive_age_sec"] = int(time.time()) - last_ts
+    except Exception:
+        pass
+
+    try:
+        if fail_file.exists():
+            result["fail_count"] = int(fail_file.read_text().strip())
+    except Exception:
+        pass
+
+    return jsonify(result)
+
+
 @app.route("/api/analyze")
 def api_analyze():
     try:

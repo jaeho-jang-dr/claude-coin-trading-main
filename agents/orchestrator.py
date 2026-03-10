@@ -226,6 +226,9 @@ class Orchestrator:
         # 감독 오버라이드: 에이전트 결정을 최종 검증
         decision = self._override_decision(decision, drop_context, market_state)
 
+        # 매수 점수 상세 저장
+        agent.save_buy_score_detail(decision, market_data)
+
         # DCA 이력 추적
         self._track_dca(decision)
 
@@ -728,7 +731,18 @@ class Orchestrator:
 
         try:
             import requests
+            # cycle_id 생성
+            try:
+                import sys as _sys
+                _sys.path.insert(0, str(PROJECT_DIR))
+                from scripts.cycle_id import get_or_create_cycle_id
+                _cycle_id = get_or_create_cycle_id("agent")
+            except Exception:
+                from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+                _cycle_id = _dt.now(_tz(_td(hours=9))).strftime("%Y%m%d-%H%M") + "-agent"
+
             row = {
+                "cycle_id": _cycle_id,
                 "from_agent": switch_info["from"],
                 "to_agent": switch_info["to"],
                 "reason": switch_info["reason"],
@@ -993,7 +1007,7 @@ class Orchestrator:
         # ① DCA인데 캐스케이딩 극심 → 매도로 전환
         if decision.decision == "buy" and is_dca and cascade >= 70:
             btc_holding = {}  # 매도 볼륨은 에이전트가 이미 계산했을 수 있음
-            return Dec(
+            overridden = Dec(
                 decision="sell",
                 confidence=0.85,
                 reason=(
@@ -1007,13 +1021,17 @@ class Orchestrator:
                 external_signal=decision.external_signal,
                 agent_name=f"🎯 감독 오버라이드 ({decision.agent_name})",
             )
+            overridden._orchestrator_override = True
+            overridden._override_reason = f"cascade_risk_{cascade}_dca_blocked"
+            overridden._original_action = decision.decision
+            return overridden
 
         # ② 신규 매수인데 급락 진행 중 → 관망으로 전환
         if (decision.decision == "buy"
                 and not is_dca
                 and drop_context.get("price_change_4h", 0) < -3
                 and trend_falling):
-            return Dec(
+            overridden = Dec(
                 decision="hold",
                 confidence=0.75,
                 reason=(
@@ -1026,6 +1044,10 @@ class Orchestrator:
                 external_signal=decision.external_signal,
                 agent_name=f"🎯 감독 오버라이드 ({decision.agent_name})",
             )
+            overridden._orchestrator_override = True
+            overridden._override_reason = f"crash_in_progress_4h_{drop_context['price_change_4h']:+.1f}pct"
+            overridden._original_action = decision.decision
+            return overridden
 
         return decision
 

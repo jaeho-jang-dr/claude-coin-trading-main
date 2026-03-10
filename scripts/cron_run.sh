@@ -110,5 +110,13 @@ if [ "$AGENT_SUCCESS" = "false" ]; then
   }
 fi
 
+# ══════════════════════════════════════════════════════════
+# 회고: 과거 결정의 사후 가격 추적 (매 실행마다)
+# ══════════════════════════════════════════════════════════
+echo "[$(date)] 회고 분석 시작..." >> "$LOG_FILE"
+python3 scripts/retrospective.py >> "$LOG_FILE" 2>&1 || {
+  echo "[$(date)] WARNING: 회고 분석 실패 (치명적 아님)" >> "$LOG_FILE"
+}
+
 # 완료
 echo "[$(date)] === cron 실행 완료 ===" >> "$LOG_FILE"

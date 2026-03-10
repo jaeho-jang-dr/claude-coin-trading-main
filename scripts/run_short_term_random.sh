@@ -79,14 +79,18 @@ sleep "$RUN_SECONDS"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] ${RUN_HOURS}시간 경과 — 봇 종료" | tee -a "$LOG_FILE"
 
-# SIGINT로 정상 종료 (세션 요약 출력을 위해)
+# SIGINT로 정상 종료 (세션 요약 + DB 기록을 위해)
 kill -INT "$BOT_PID" 2>/dev/null || true
-sleep 5
+sleep 15  # v4: 5→15초 대기 (DB 기록 시간 확보)
 
-# 아직 살아있으면 강제 종료
+# 아직 살아있으면 SIGTERM 시도 후 강제 종료
 if kill -0 "$BOT_PID" 2>/dev/null; then
-  kill -9 "$BOT_PID" 2>/dev/null || true
-  echo "  강제 종료됨" | tee -a "$LOG_FILE"
+  kill -TERM "$BOT_PID" 2>/dev/null || true
+  sleep 5
+  if kill -0 "$BOT_PID" 2>/dev/null; then
+    kill -9 "$BOT_PID" 2>/dev/null || true
+    echo "  강제 종료됨" | tee -a "$LOG_FILE"
+  fi
 fi
 
 # 텔레그램 알림

@@ -295,6 +295,7 @@ class ExternalDataAgent:
             "eth_btc": ("collect_eth_btc.py", None),
             "macro": ("collect_macro.py", None),
             "crypto_signals": ("collect_crypto_signals.py", None),
+            "coinmarketcap": ("collect_coinmarketcap.py", None),
         }
 
         results: dict = {}
@@ -424,6 +425,20 @@ class ExternalDataAgent:
             extra_score += crypto_adj
             extra_details.append(f"BTC 거래량 {btc_anomaly}: {crypto_adj:+d}점")
 
+        # CoinMarketCap 매크로 시황 (±5)
+        cmc = results.get("coinmarketcap", {}) or {}
+        cmc_adj = 0
+        if cmc.get("status") == "success":
+            btc_dom = cmc.get("btc_dominance")
+            if btc_dom:
+                if btc_dom > 55:  # BTC 강세장 리드
+                    cmc_adj = 5
+                elif btc_dom < 45: # 알트 시즌 (BTC 모멘텀 약화)
+                    cmc_adj = -5
+            if cmc_adj != 0:
+                extra_score += cmc_adj
+                extra_details.append(f"CMC BTC 도미넌스({btc_dom:.1f}%): {cmc_adj:+d}점")
+
         # 기존 total_score에 추가
         old_total = fusion.get("total_score", 0)
         new_total = old_total + extra_score
@@ -503,6 +518,15 @@ class ExternalDataAgent:
                 score += 10 if btc_chg > 0 else -10
             elif btc_anom == "MODERATE" and abs(btc_chg) > 3:
                 score += 5 if btc_chg > 0 else -5
+
+        # CoinMarketCap
+        cmc = results.get("coinmarketcap", {}) or {}
+        if cmc.get("status") == "success":
+            b_dom = cmc.get("btc_dominance")
+            if b_dom and b_dom > 55:
+                score += 5
+            elif b_dom and b_dom < 45:
+                score -= 5
 
         # strategy_bonus 매핑
         if score >= 40:

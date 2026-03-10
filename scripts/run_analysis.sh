@@ -87,6 +87,10 @@ python3 scripts/binance_sentiment.py > "${SNAPSHOT_DIR}/binance_sentiment.json" 
 python3 scripts/collect_crypto_signals.py > "${SNAPSHOT_DIR}/crypto_signals.json" 2>/dev/null \
   || echo '{"error":"crypto_signals 수집 실패"}' > "${SNAPSHOT_DIR}/crypto_signals.json"
 
+# 12. CoinMarketCap (MCMP 대체 - 글로벌/매크로 지표)
+python3 scripts/collect_coinmarketcap.py > "${SNAPSHOT_DIR}/coinmarketcap.json" 2>/dev/null \
+  || echo '{"error":"coinmarketcap 수집 실패"}' > "${SNAPSHOT_DIR}/coinmarketcap.json"
+
 echo "[$(date)] 데이터 수집 완료. 외부 시그널 종합 중..." >&2
 
 # 10. 외부 지표 종합 점수 산출 (Data Fusion)
@@ -107,6 +111,7 @@ WHALE_TRACKER=$(cat "${SNAPSHOT_DIR}/whale_tracker.json")
 BINANCE_SENTIMENT=$(cat "${SNAPSHOT_DIR}/binance_sentiment.json")
 EXTERNAL_SIGNAL=$(cat "${SNAPSHOT_DIR}/external_signal.json")
 CRYPTO_SIGNALS=$(cat "${SNAPSHOT_DIR}/crypto_signals.json")
+COINMARKETCAP=$(cat "${SNAPSHOT_DIR}/coinmarketcap.json")
 
 # Supabase에서 과거 결정 조회 (최근 10건) - PostgREST API 사용
 PAST_DECISIONS="[]"
@@ -268,6 +273,15 @@ ${CRYPTO_SIGNALS}
 - BTC vol_mcap_ratio > 5% = 비정상적 거래량 급증 → 큰 움직임 예고
 - anomaly_alerts에 주요 토큰 포함 시 시장 전체 변동성 증가 시그널
 - ETH anomaly_level이 HIGH/CRITICAL이면 알트 과열 경고
+
+═══════════════════════════════════════════
+[CoinMarketCap (매크로 시장 환경)]
+═══════════════════════════════════════════
+${COINMARKETCAP}
+해석:
+- btc_dominance 상승 + 시장 전체 시총 상승 = 안정적 비트코인 상승 (매수 긍정)
+- btc_dominance 하락 + ETH 상승 = 알트시즌 초입 가능성
+- 총 시가총액(total_market_cap) 감소 = 자본 이탈(리스크 오프)
 
 ═══════════════════════════════════════════
 [★ 외부 지표 종합 시그널 (Data Fusion)]

@@ -25,6 +25,175 @@ import requests
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
+# ── RAG 임베딩 ──────────────────────────────────────────────────────────────
+
+def generate_state_embedding(market_data: dict) -> tuple[str, list] | tuple[None, None]:
+    """시장 상태를 영문 텍스트로 요약하고 OpenAI 임베딩 벡터를 생성한다.
+
+    Args:
+        market_data: current_price, rsi_14, fear_greed_value, sma_20,
+                     change_rate_24h, news_sentiment, funding_rate, volume_24h 등
+
+    Returns:
+        (embedding_text, embedding_vector) 또는 실패 시 (None, None)
+    """
+    try:
+        text = build_embedding_text(market_data)
+        if not text:
+            return None, None
+
+        from openai import OpenAI
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        resp = client.embeddings.create(
+            model="text-embedding-3-small",
+            input=text,
+        )
+        vector = resp.data[0].embedding
+        return text, vector
+    except Exception as e:
+        print(f"[save_decision] 임베딩 생성 실패: {e}", file=sys.stderr)
+        return None, None
+
+
+def build_embedding_text(market_data: dict) -> str:
+    """시장 데이터를 임베딩용 영문 텍스트로 변환한다.
+
+    save_decision.py와 recall_rag.py가 동일한 텍스트를 생성하도록 공유 함수로 분리.
+    """
+    parts = []
+
+    # Price
+    price = market_data.get("current_price")
+    change = market_data.get("change_rate_24h")
+    if price:
+        price_str = f"Bitcoin price is {int(price):,} KRW"
+        if change is not None:
+            pct = change * 100 if abs(change) < 1 else change
+            price_str += f" (24h change: {pct:+.1f}%)"
+        parts.append(price_str + ".")
+
+    # RSI
+    rsi_val = market_data.get("rsi_14") or (market_data.get("indicators", {}) or {}).get("rsi_14")
+    if rsi_val is not None:
+        rsi_val = float(rsi_val)
+        if rsi_val < 30:
+            label = "oversold"
+        elif rsi_val > 70:
+            label = "overbought"
+        else:
+            label = "neutral"
+        parts.append(f"RSI is {rsi_val:.1f} ({label}).")
+
+    # Fear & Greed
+    fgi = market_data.get("fear_greed_value")
+    if fgi is None:
+        fg = market_data.get("fear_greed", {})
+        if isinstance(fg, dict):
+            fgi = fg.get("value") or (fg.get("current", {}) or {}).get("value")
+    if fgi is not None:
+        fgi = int(fgi)
+        if fgi <= 25:
+            fgi_label = "Extreme Fear"
+        elif fgi <= 45:
+            fgi_label = "Fear"
+        elif fgi <= 55:
+            fgi_label = "Neutral"
+        elif fgi <= 75:
+            fgi_label = "Greed"
+        else:
+            fgi_label = "Extreme Greed"
+        parts.append(f"Fear and Greed Index is {fgi} ({fgi_label}).")
+
+    # SMA
+    sma = market_data.get("sma20_price") or market_data.get("sma_20") or (market_data.get("indicators", {}) or {}).get("sma_20")
+    if sma and price:
+        direction = "above" if float(price) > float(sma) else "below"
+        bias = "bullish" if direction == "above" else "bearish"
+        parts.append(f"SMA20 is {direction} price ({bias}).")
+
+    # News sentiment
+    ns = market_data.get("news_sentiment")
+    if ns is not None:
+        try:
+            ns_val = float(ns)
+            if ns_val > 0.2:
+                label = "positive"
+            elif ns_val < -0.2:
+                label = "negative"
+            else:
+                label = "neutral"
+            parts.append(f"News sentiment is {label} ({ns_val:+.2f}).")
+        except (ValueError, TypeError):
+            if isinstance(ns, str):
+                parts.append(f"News sentiment is {ns}.")
+
+    # Funding rate
+    fr = market_data.get("funding_rate")
+    if fr is not None:
+        try:
+            fr_val = float(fr)
+            bias = "bullish" if fr_val > 0 else "bearish"
+            parts.append(f"Funding rate is {fr_val:+.4f}% ({bias}).")
+        except (ValueError, TypeError):
+            pass
+
+    # Volume
+    vol = market_data.get("volume_24h")
+    if vol is not None:
+        try:
+            vol_f = float(vol)
+            parts.append(f"24h volume is {vol_f:,.0f} BTC.")
+        except (ValueError, TypeError):
+            pass
+
+    # Kimchi premium
+    kp = market_data.get("kimchi_premium")
+    if kp is not None:
+        try:
+            kp_val = float(kp)
+            parts.append(f"Kimchi premium is {kp_val:+.2f}%.")
+        except (ValueError, TypeError):
+            pass
+
+    # Long/Short ratio
+    ls = market_data.get("long_short_ratio")
+    if ls is not None:
+        try:
+            ls_val = float(ls)
+            parts.append(f"Long/Short ratio is {ls_val:.2f}.")
+        except (ValueError, TypeError):
+            pass
+
+    return " ".join(parts)
+
+
+def _update_embedding_via_sql(decision_id: str, embedding: list, embedding_text: str):
+    """psycopg2로 직접 SQL을 실행하여 벡터 임베딩을 업데이트한다.
+
+    Supabase REST API가 pgvector 타입을 지원하지 않으므로 직접 DB 연결이 필요.
+    """
+    db_url = os.getenv("SUPABASE_DB_URL")
+    if not db_url:
+        print("[save_decision] SUPABASE_DB_URL 미설정 — 임베딩 저장 건너뜀", file=sys.stderr)
+        return
+
+    import psycopg2
+    conn = None
+    try:
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE decisions SET state_embedding = %s::vector, embedding_text = %s WHERE id = %s",
+            (str(embedding), embedding_text, str(decision_id)),
+        )
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        print(f"[save_decision] 임베딩 SQL 업데이트 실패: {e}", file=sys.stderr)
+    finally:
+        if conn:
+            conn.close()
+
 KST = timezone(timedelta(hours=9))
 
 # cycle_id: 같은 실행 사이클의 모든 DB 기록을 연결하는 키
@@ -462,7 +631,7 @@ def save_decision(data: dict) -> dict | None:
 
     result = supabase_post("decisions", row)
 
-    # 결정 저장 성공 시 market_context_log도 함께 저장
+    # 결정 저장 성공 시 market_context_log + 임베딩 저장
     if result:
         decision_id = None
         if isinstance(result, list) and len(result) > 0:
@@ -470,6 +639,7 @@ def save_decision(data: dict) -> dict | None:
         elif isinstance(result, dict):
             decision_id = result.get("id")
 
+        # market_context_log 저장
         try:
             save_market_context(
                 decision_id=decision_id,
@@ -480,6 +650,24 @@ def save_decision(data: dict) -> dict | None:
             )
         except Exception as e:
             print(f"[save_decision] market_context_log 저장 실패: {e}", file=sys.stderr)
+
+        # RAG 임베딩 생성 및 저장 (실패해도 매매 파이프라인에 영향 없음)
+        if decision_id:
+            try:
+                emb_data = {**data}
+                # _market_data가 있으면 더 풍부한 데이터 소스 사용
+                raw_market = data.get("_market_data", {})
+                if raw_market:
+                    emb_data.setdefault("current_price", raw_market.get("current_price"))
+                    emb_data.setdefault("change_rate_24h", raw_market.get("change_rate_24h"))
+                    emb_data.setdefault("volume_24h", raw_market.get("volume_24h"))
+                    if "indicators" in raw_market:
+                        emb_data.setdefault("indicators", raw_market["indicators"])
+                emb_text, emb_vector = generate_state_embedding(emb_data)
+                if emb_text and emb_vector:
+                    _update_embedding_via_sql(decision_id, emb_vector, emb_text)
+            except Exception as e:
+                print(f"[save_decision] RAG 임베딩 저장 실패 (무시): {e}", file=sys.stderr)
 
     return result
 

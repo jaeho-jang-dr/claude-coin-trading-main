@@ -287,22 +287,40 @@ def main():
         market_data["news"]["overall_sentiment"] = news_sentiment.get("overall_sentiment", "neutral")
         market_data["news"]["sentiment_score"] = news_sentiment.get("sentiment_score", 0)
         
-        # Supabase 과거 결정 (선택사항)
+        # RAG: 현재 시장과 유사한 과거 경험 조회 (LIMIT 10 → 벡터 유사도 Top 3)
         past_decisions = []
-        supabase_url = os.environ.get("SUPABASE_URL", "")
-        supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
-        if supabase_url and supabase_key:
-            try:
-                resp = requests.get(
-                    f"{supabase_url}/rest/v1/decisions",
-                    params={"select": "*", "order": "created_at.desc", "limit": "10"},
-                    headers={"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"},
-                    timeout=5,
-                )
-                if resp.status_code == 200:
-                    past_decisions = resp.json()
-            except Exception as e:
-                log(f"Supabase 조회 실패: {e}")
+        try:
+            import subprocess as _sp
+            rag_result = _sp.run(
+                [sys.executable, "scripts/recall_rag.py", "--json", "--top", "3"],
+                cwd=str(PROJECT_DIR),
+                capture_output=True, text=True, timeout=30,
+            )
+            if rag_result.returncode == 0 and rag_result.stdout.strip():
+                rag_data = json.loads(rag_result.stdout)
+                if isinstance(rag_data, list) and rag_data:
+                    past_decisions = rag_data
+                    log(f"RAG: 유사 과거 경험 {len(rag_data)}건 조회")
+        except Exception as e:
+            log(f"RAG 조회 실패 (fallback): {e}")
+
+        # RAG 실패 시 기존 방식 fallback (최근 5건만)
+        if not past_decisions:
+            supabase_url = os.environ.get("SUPABASE_URL", "")
+            supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+            if supabase_url and supabase_key:
+                try:
+                    resp = requests.get(
+                        f"{supabase_url}/rest/v1/decisions",
+                        params={"select": "id,decision,reason,confidence,current_price,profit_loss,created_at", "order": "created_at.desc", "limit": "5"},
+                        headers={"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"},
+                        timeout=5,
+                    )
+                    if resp.status_code == 200:
+                        past_decisions = resp.json()
+                        log(f"RAG fallback: 최근 {len(past_decisions)}건 조회")
+                except Exception as e:
+                    log(f"Supabase 조회 실패: {e}")
                 
         # 포트폴리오 메타 데이터 주입
         btc_info = portfolio.get("coins", {}).get("BTC", portfolio.get("btc", {}))

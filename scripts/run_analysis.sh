@@ -113,14 +113,22 @@ EXTERNAL_SIGNAL=$(cat "${SNAPSHOT_DIR}/external_signal.json")
 CRYPTO_SIGNALS=$(cat "${SNAPSHOT_DIR}/crypto_signals.json")
 COINMARKETCAP=$(cat "${SNAPSHOT_DIR}/coinmarketcap.json")
 
-# Supabase에서 과거 결정 조회 (최근 10건) - PostgREST API 사용
+# RAG: 현재 시장과 유사한 과거 경험 조회 (벡터 유사도 Top 3)
 PAST_DECISIONS="[]"
-if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
-  PAST_DECISIONS=$(curl -s \
-    "${SUPABASE_URL}/rest/v1/decisions?select=*&order=created_at.desc&limit=10" \
-    -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
-    -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
-    2>/dev/null || echo "[]")
+RAG_OUTPUT=$(python3 scripts/recall_rag.py --json --top 3 2>/dev/null) || true
+if [ -n "$RAG_OUTPUT" ] && [ "$RAG_OUTPUT" != "[]" ]; then
+  PAST_DECISIONS="$RAG_OUTPUT"
+  echo "  RAG: 유사 과거 경험 조회 완료" >&2
+else
+  # RAG 실패 시 fallback (최근 5건, 필수 컬럼만)
+  if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
+    PAST_DECISIONS=$(curl -s \
+      "${SUPABASE_URL}/rest/v1/decisions?select=id,decision,reason,confidence,current_price,profit_loss,created_at&order=created_at.desc&limit=5" \
+      -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+      -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+      2>/dev/null || echo "[]")
+    echo "  RAG fallback: 최근 결정 조회" >&2
+  fi
 fi
 
 # 미반영 피드백 조회
@@ -292,7 +300,7 @@ ${EXTERNAL_SIGNAL}
 ★ fusion.signal이 mixed이면 관망 우선 고려하세요.
 
 ═══════════════════════════════════════════
-[과거 의사결정 (최근 10건)]
+[★ 가장 유사했던 과거 경험 (RAG 벡터 검색)]
 ═══════════════════════════════════════════
 ${PAST_DECISIONS}
 

@@ -585,46 +585,53 @@ class ExternalDataAgent:
             return
 
         sources = results.get("sources", {})
+        ext_sig = external_signal
 
         # -- Binance Futures --
         bs = sources.get("binance_sentiment", {})
         bs_sent = bs.get("sentiment_score", {})
         binance_score = bs_sent.get("score", None) if isinstance(bs_sent, dict) else None
-        ls_ratio = bs.get("long_short_ratio", {}).get("ratio", None) if isinstance(bs.get("long_short_ratio"), dict) else None
-        funding_rate = bs.get("funding_rate", {}).get("rate", None) if isinstance(bs.get("funding_rate"), dict) else None
-        oi_change = bs.get("open_interest", {}).get("change_pct", None) if isinstance(bs.get("open_interest"), dict) else None
+        # top_trader_long_short.current_ratio (실제 출력 키)
+        tls = bs.get("top_trader_long_short", {})
+        ls_ratio = tls.get("current_ratio", None) if isinstance(tls, dict) else None
+        # funding_rate.current_rate (실제 출력 키)
+        fr = bs.get("funding_rate", {})
+        funding_rate = fr.get("current_rate", None) if isinstance(fr, dict) else None
+        # open_interest.oi_change_24h_pct (실제 출력 키)
+        oi = bs.get("open_interest", {})
+        oi_change = oi.get("oi_change_24h_pct", None) if isinstance(oi, dict) else None
         kimchi_pct = bs.get("kimchi_premium", {}).get("premium_pct", None) if isinstance(bs.get("kimchi_premium"), dict) else None
 
         # -- Whale / On-chain --
         wt = sources.get("whale_tracker", {})
         ws_obj = wt.get("whale_score", {})
         whale_score = ws_obj.get("score", None) if isinstance(ws_obj, dict) else None
-        whale_flow = ws_obj.get("flow", None) if isinstance(ws_obj, dict) else None
-        large_tx_count = wt.get("large_transactions", {}).get("count", None) if isinstance(wt.get("large_transactions"), dict) else None
-        ex_flow = wt.get("exchange_flow", {})
-        exchange_inflow = ex_flow.get("inflow", None) if isinstance(ex_flow, dict) else None
-        exchange_outflow = ex_flow.get("outflow", None) if isinstance(ex_flow, dict) else None
+        whale_flow = ws_obj.get("direction", None) if isinstance(ws_obj, dict) else None
+        ba = wt.get("block_analysis", {})
+        large_tx_count = ba.get("whale_txs_count", None) if isinstance(ba, dict) else None
+        dir_btc = ba.get("direction_btc", {}) if isinstance(ba, dict) else {}
+        exchange_inflow = dir_btc.get("exchange_deposit", None) if isinstance(dir_btc, dict) else None
+        exchange_outflow = dir_btc.get("exchange_withdrawal", None) if isinstance(dir_btc, dict) else None
 
         # -- Macro --
-        macro_data = sources.get("macro", {}).get("analysis", {})
-        macro_score = macro_data.get("macro_score", None)
-        sp500 = macro_data.get("sp500_change", None)
-        dxy = macro_data.get("dxy_change", None)
-        gold = macro_data.get("gold_change", None)
-        us10y = macro_data.get("us10y_change", None)
+        macro_analysis = sources.get("macro", {}).get("analysis", {})
+        macro_score = macro_analysis.get("macro_score", None)
+        macro_quotes = sources.get("macro", {}).get("quotes", {})
+        sp500 = macro_quotes.get("sp500", {}).get("change_pct", None)
+        dxy = macro_quotes.get("dxy", {}).get("change_pct", None)
+        gold = macro_quotes.get("gold", {}).get("change_pct", None)
+        us10y = macro_quotes.get("us10y", {}).get("change_pct", None)
 
         # -- FGI --
         fg = sources.get("fear_greed", {})
         fg_current = fg.get("current", {})
         fgi_value = int(fg_current.get("value", 0)) if fg_current.get("value") is not None else None
-        fgi_class = fg_current.get("value_classification", None)
+        fgi_class = fg_current.get("classification", None)
 
         # -- News --
         ns = sources.get("news_sentiment", {})
         news_sentiment = ns.get("sentiment_score", None)
         news_count = ns.get("total_articles", None)
-        # news_score from fusion extra_components
-        ext_sig = external_signal
         news_score_val = ext_sig.get("extra_components", {}).get("news_sentiment", {}).get("score", None)
 
         # -- ETH/BTC --
@@ -632,7 +639,7 @@ class ExternalDataAgent:
         eth_btc_ratio = eth.get("eth_btc_ratio", None)
         eth_btc_z = eth.get("eth_btc_z_score", None)
         eth_btc_score = ext_sig.get("extra_components", {}).get("eth_btc", {}).get("score", None)
-        eth_btc_trend = eth.get("trend", None)
+        eth_btc_trend = eth.get("signal", None)
 
         # -- CoinGecko --
         cs = sources.get("crypto_signals", {}) or {}

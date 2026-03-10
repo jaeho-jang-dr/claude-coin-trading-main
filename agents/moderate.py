@@ -89,7 +89,7 @@ class ModerateAgent(BaseStrategyAgent):
                     total_krw = portfolio.get("krw_balance", 0)
                     dca_amount = min(
                         int(btc_holding.get("avg_buy_price", 0) * btc_holding.get("balance", 0) * self.dca_max_ratio),
-                        self._calculate_trade_amount(total_krw),
+                        self._calculate_trade_amount(total_krw, external_bonus),
                     )
                     return Decision(
                         decision="buy",
@@ -115,7 +115,7 @@ class ModerateAgent(BaseStrategyAgent):
                 )
 
             total_krw = portfolio.get("krw_balance", 0)
-            amount = self._calculate_trade_amount(total_krw)
+            amount = self._calculate_trade_amount(total_krw, external_bonus)
 
             return Decision(
                 decision="buy",

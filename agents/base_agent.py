@@ -364,11 +364,14 @@ class BaseStrategyAgent(ABC):
         import datetime
         return datetime.datetime.now().weekday() >= 5
 
-    def _calculate_trade_amount(self, total_krw: float) -> int:
+    def _calculate_trade_amount(self, total_krw: float, external_bonus: int = 0) -> int:
         """1회 매매 금액을 계산한다."""
         amount = int(total_krw * self.max_trade_ratio)
         if self._is_weekend():
-            amount = int(amount * (1 - self.weekend_reduction))
+            if external_bonus >= 10:
+                pass  # 주말이더라도 외부 점수가 높으면 축소 룰 무효화 (불장/호재)
+            else:
+                amount = int(amount * (1 - self.weekend_reduction))
         # MAX_TRADE_AMOUNT 안전장치
         import os
         max_amount = int(os.getenv("MAX_TRADE_AMOUNT", "100000"))

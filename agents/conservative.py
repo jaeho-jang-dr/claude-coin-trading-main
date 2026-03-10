@@ -87,7 +87,7 @@ class ConservativeAgent(BaseStrategyAgent):
                     total_krw = portfolio.get("krw_balance", 0)
                     dca_amount = min(
                         int(btc_holding.get("avg_buy_price", 0) * btc_holding.get("balance", 0) * self.dca_max_ratio),
-                        self._calculate_trade_amount(total_krw),
+                        self._calculate_trade_amount(total_krw, external_bonus),
                     )
                     return Decision(
                         decision="buy",
@@ -126,7 +126,7 @@ class ConservativeAgent(BaseStrategyAgent):
                 reason = f"매수 점수 {buy_score['total']}점 >= {self.buy_score_threshold}점 충족"
 
             total_krw = portfolio.get("krw_balance", 0)
-            amount = self._calculate_trade_amount(total_krw)
+            amount = self._calculate_trade_amount(total_krw, external_bonus)
 
             return Decision(
                 decision="buy",

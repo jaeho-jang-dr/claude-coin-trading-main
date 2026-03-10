@@ -86,7 +86,7 @@ class AggressiveAgent(BaseStrategyAgent):
                     total_krw = portfolio.get("krw_balance", 0)
                     dca_amount = min(
                         int(btc_holding.get("avg_buy_price", 0) * btc_holding.get("balance", 0) * self.dca_max_ratio),
-                        self._calculate_trade_amount(total_krw),
+                        self._calculate_trade_amount(total_krw, external_bonus),
                     )
                     return Decision(
                         decision="buy",
@@ -101,7 +101,7 @@ class AggressiveAgent(BaseStrategyAgent):
         # 매수 판단 (공격적: AI 필터 완화)
         if buy_score["result"] == "buy":
             total_krw = portfolio.get("krw_balance", 0)
-            amount = self._calculate_trade_amount(total_krw)
+            amount = self._calculate_trade_amount(total_krw, external_bonus)
 
             return Decision(
                 decision="buy",

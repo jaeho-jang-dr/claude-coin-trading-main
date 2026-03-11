@@ -41,15 +41,17 @@ if [ ! -d ".venv" ]; then
     echo "  가상환경 생성 완료"
 fi
 
-# Windows/Linux 분기
-if [ -f ".venv/Scripts/activate" ]; then
-    source .venv/Scripts/activate
+# Windows: venv의 python을 직접 사용 (source activate가 bash에서 불안정)
+if [ -f ".venv/Scripts/python.exe" ]; then
+    VPYTHON=".venv/Scripts/python.exe"
+    VPIP=".venv/Scripts/pip.exe"
 else
-    source .venv/bin/activate
+    VPYTHON=".venv/bin/python"
+    VPIP=".venv/bin/pip"
 fi
 
-pip install --upgrade pip -q
-pip install -r requirements.txt -q
+"$VPYTHON" -m pip install --upgrade pip -q 2>/dev/null || true
+"$VPYTHON" -m pip install -r requirements.txt -q
 echo "  의존성 설치 완료"
 
 # --- 4. RL 모델 복원 ---
@@ -74,9 +76,8 @@ fi
 # --- 5. Playwright 브라우저 ---
 echo ""
 echo "[5/7] Playwright 브라우저 설치..."
-if python -c "from playwright.sync_api import sync_playwright" 2>/dev/null; then
-    playwright install chromium 2>/dev/null || python -m playwright install chromium
-    echo "  Chromium 설치 완료"
+if "$VPYTHON" -c "from playwright.sync_api import sync_playwright" 2>/dev/null; then
+    "$VPYTHON" -m playwright install chromium 2>/dev/null && echo "  Chromium 설치 완료" || echo "  [건너뜀] Chromium 설치 실패"
 else
     echo "  [건너뜀] playwright 패키지 없음"
 fi
@@ -98,19 +99,21 @@ mkdir -p data/charts data/snapshots data/rl_models/best data/rl_models/backups
 
 echo ""
 echo "=== 검증 ==="
-echo -n "  Python:     " && python --version
-echo -n "  pip 패키지: " && pip list --format=columns 2>/dev/null | wc -l | tr -d ' '
+echo -n "  Python:     " && "$VPYTHON" --version
+echo -n "  pip 패키지: " && "$VPYTHON" -m pip list 2>/dev/null | wc -l | tr -d ' '
 echo "개"
 echo -n "  .env:       " && ([ -f .env ] && echo "OK" || echo "MISSING")
 echo -n "  RL 모델:    " && ([ -f "$MODEL_DIR/best_model.zip" ] && echo "OK ($(ls -lh $MODEL_DIR/best_model.zip | awk '{print $5}'))" || echo "MISSING")
-echo -n "  Playwright: " && (python -c "from playwright.sync_api import sync_playwright; print('OK')" 2>/dev/null || echo "MISSING")
+echo -n "  SB3:        " && ("$VPYTHON" -c "import stable_baselines3; print('OK')" 2>/dev/null || echo "MISSING")
+echo -n "  PyTorch:    " && ("$VPYTHON" -c "import torch; print('OK')" 2>/dev/null || echo "MISSING")
+echo -n "  Playwright: " && ("$VPYTHON" -c "from playwright.sync_api import sync_playwright; print('OK')" 2>/dev/null || echo "MISSING")
 
 echo ""
 echo "=== 셋업 완료 ==="
 echo ""
 echo "다음 단계:"
-echo "  1. E2E 테스트:  python tests/test_e2e_hybrid.py"
-echo "  2. RL 훈련:     python -m rl_hybrid.rl.train --interval 4h --days 180 --steps 500000"
-echo "  3. 시스템 시작:  python rl_hybrid/launchers/start_all.py"
-echo "  4. 주간 재학습:  python scripts/setup_weekly_retrain.py"
+echo "  1. E2E 테스트:  $VPYTHON tests/test_e2e_hybrid.py"
+echo "  2. RL 훈련:     $VPYTHON -m rl_hybrid.rl.train --interval 4h --days 180 --steps 500000"
+echo "  3. 시스템 시작:  $VPYTHON rl_hybrid/launchers/start_all.py"
+echo "  4. 주간 재학습:  $VPYTHON scripts/setup_weekly_retrain.py"
 echo ""

@@ -157,11 +157,14 @@ async function loadStatus() {
 }
 
 async function loadFGI() {
-  // Fear & Greed는 market API에 포함 안 됨 -> 별도 호출 또는 Supabase에서
-  try {
-    const d = await fetchJSON('/api/market');
-    // market data에 FGI가 없으므로 placeholder
-  } catch(e) {}
+  const d = await fetchJSON('/api/fgi');
+  if(d.error) return;
+  const el = document.getElementById('ind-fgi');
+  el.textContent = d.value + ' (' + d.label + ')';
+  if(d.value <= 25) el.className = 'val red';
+  else if(d.value <= 45) el.className = 'val yellow';
+  else if(d.value >= 75) el.className = 'val green';
+  else el.className = 'val';
 }
 
 async function loadDecisions() {
@@ -186,7 +189,7 @@ async function loadDecisions() {
 }
 
 async function loadAll() {
-  await Promise.all([loadPortfolio(), loadMarket(), loadStatus(), loadDecisions()]);
+  await Promise.all([loadPortfolio(), loadMarket(), loadFGI(), loadStatus(), loadDecisions()]);
 }
 
 loadAll();

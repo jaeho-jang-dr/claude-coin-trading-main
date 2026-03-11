@@ -413,13 +413,20 @@ def save_market_context(
 
     # ── Price ──
     ticker = market_data.get("ticker", {})
-    btc_price = _safe_int(ticker.get("trade_price"))
+    btc_price = _safe_int(
+        ticker.get("trade_price")
+        or market_data.get("current_price")
+        or market_data.get("price")
+    )
     btc_24h_change = _safe_float(
         ticker.get("signed_change_rate", market_data.get("change_rate_24h", 0))
     )
     if btc_24h_change is not None and abs(btc_24h_change) < 1:
         btc_24h_change = round(btc_24h_change * 100, 2)  # 비율 → 퍼센트
-    btc_volume = _safe_float(ticker.get("acc_trade_volume_24h"))
+    btc_volume = _safe_float(
+        ticker.get("acc_trade_volume_24h")
+        or market_data.get("volume_24h")
+    )
 
     # ── Technical indicators ──
     indicators = market_data.get("indicators", {})

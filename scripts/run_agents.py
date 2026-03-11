@@ -27,61 +27,6 @@ from agents.orchestrator import Orchestrator
 
 KST = timezone(timedelta(hours=9))
 
-
-def get_rl_advisory(market_data: dict, external_data: dict,
-                    portfolio: dict, agent_state: dict) -> dict | None:
-    """Phase 2.5: RL 모델 어드바이저리 시그널. 모델 없으면 None 반환.
-
-    model_info.json이 있으면 해당 알고리즘(PPO/SAC/TD3)으로 로드하고,
-    없으면 PPOTrader로 폴백한다.
-    """
-    try:
-        from rl_hybrid.rl.policy import SB3_AVAILABLE
-        from rl_hybrid.rl.state_encoder import StateEncoder
-        if not SB3_AVAILABLE:
-            return None
-
-        model_path = str(PROJECT_DIR / "data" / "rl_models" / "best" / "best_model")
-        if not (PROJECT_DIR / "data" / "rl_models" / "best" / "best_model.zip").exists():
-            return None
-
-        # 알고리즘 감지: model_info.json이 있으면 해당 알고리즘 사용
-        algo = "ppo"  # 기본값 (폴백)
-        info_path = PROJECT_DIR / "data" / "rl_models" / "best" / "model_info.json"
-        if info_path.exists():
-            try:
-                with open(info_path) as f:
-                    model_info = json.load(f)
-                algo = model_info.get("algorithm", "ppo")
-            except (json.JSONDecodeError, KeyError):
-                pass  # 파싱 실패 시 PPO 폴백
-
-        from rl_hybrid.rl.train import get_trader_class
-        TraderClass = get_trader_class(algo)
-
-        encoder = StateEncoder()
-        obs = encoder.encode(market_data, external_data, portfolio, agent_state)
-
-        trader = TraderClass(env=None, model_path=model_path)
-        action = trader.predict(obs)
-
-        if action > 0.3:
-            direction = "buy"
-        elif action < -0.3:
-            direction = "sell"
-        else:
-            direction = "hold"
-
-        return {
-            "action": round(float(action), 4),
-            "abs_action": round(abs(float(action)), 4),
-            "direction": direction,
-        }
-    except Exception as e:
-        log(f"RL advisory 실패: {e}")
-        return None
-
-
 # cycle_id: 이 파이프라인 실행의 모든 DB 기록을 연결하는 키
 try:
     from scripts.cycle_id import make_cycle_id, set_cycle_id
@@ -324,9 +269,6 @@ def main():
     try:
         ext_agent = ExternalDataAgent(snapshot_dir=snapshot_dir)
         external_data = ext_agent.collect_all()
-        # NVT Signal을 최상위에 배치 (StateEncoder 호환)
-        nvt_data = external_data.get("sources", external_data).get("nvt", {})
-        external_data["nvt_signal"] = nvt_data.get("nvt_signal", 100.0)
         log(f"외부 데이터 수집 완료 ({external_data.get('collection_time_sec', 0)}초)")
         data_sources_used.append("external_data")
         ext_errors = external_data.get("errors", [])
@@ -356,10 +298,7 @@ def main():
             )
             if rag_result.returncode == 0 and rag_result.stdout.strip():
                 rag_data = json.loads(rag_result.stdout)
-                if isinstance(rag_data, dict) and rag_data.get("results"):
-                    past_decisions = rag_data["results"]
-                    log(f"RAG: 유사 과거 경험 {len(past_decisions)}건 조회")
-                elif isinstance(rag_data, list) and rag_data:
+                if isinstance(rag_data, list) and rag_data:
                     past_decisions = rag_data
                     log(f"RAG: 유사 과거 경험 {len(rag_data)}건 조회")
         except Exception as e:
@@ -398,7 +337,38 @@ def main():
             portfolio=portfolio,
             past_decisions=past_decisions,
         )
-        log(f"결정: {result['decision']['decision']} by {result['active_agent']}")
+        log(f"에이전트 결정: {result['decision']['decision']} by {result['active_agent']}")
+
+        # Phase 2b: SB3 RL 블렌딩
+        rl_prediction = None
+        try:
+            from scripts.sb3_predictor import predict as rl_predict, blend_with_agent
+
+            agent_state = {
+                "danger_score": result.get("market_state", {}).get("danger_score", 30),
+                "opportunity_score": result.get("market_state", {}).get("opportunity_score", 30),
+                "cascade_risk": result.get("market_state", {}).get("cascading_risk", 20),
+                "consecutive_losses": 0,
+                "hours_since_last_trade": 24,
+                "daily_trade_count": 0,
+            }
+            rl_prediction = rl_predict(
+                market_data=market_data,
+                external_data=external_data,
+                portfolio=portfolio,
+                agent_state=agent_state,
+            )
+            if rl_prediction and "error" not in rl_prediction:
+                log(f"RL 예측: action={rl_prediction['action']}, interp={rl_prediction['interpretation']}")
+                result["decision"] = blend_with_agent(result["decision"], rl_prediction)
+                log(f"블렌딩 결과: {result['decision']['decision']} (동의={result['decision'].get('rl_blend', {}).get('agreement')})")
+                data_sources_used.append("rl_sb3")
+            else:
+                log(f"RL 예측 건너뜀: {rl_prediction}")
+        except Exception as e:
+            log(f"RL 블렌딩 실패 (에이전트 결정 유지): {e}")
+
+        log(f"최종 결정: {result['decision']['decision']} by {result['active_agent']}")
         
         output = {
             "timestamp": external_data.get("timestamp", datetime.now(KST).isoformat()),
@@ -433,52 +403,11 @@ def main():
         sys.exit(1)
         
     log("Phase 2 완료.")
-
-    # Phase 2.5: RL 모델 어드바이저리
-    rl_advisory = None
-    try:
-        agent_state_for_rl = {
-            "active_agent": output.get("active_agent", "conservative"),
-            "danger_score": output.get("danger_score", 50),
-            "opportunity_score": output.get("opportunity_score", 50),
-            "consecutive_losses": output.get("consecutive_losses", 0),
-        }
-        rl_advisory = get_rl_advisory(market_data, external_data, portfolio, agent_state_for_rl)
-        if rl_advisory:
-            log(f"RL advisory: {rl_advisory['direction']} (action={rl_advisory['action']:.4f})")
-            output["rl_advisory"] = rl_advisory
-
-            # 에이전트 결정과 RL 방향 비교하여 confidence 조정
-            agent_decision = output["decision"]["decision"]
-            rl_dir = rl_advisory["direction"]
-            rl_strength = rl_advisory["abs_action"]
-            orig_conf = output["decision"].get("confidence", 0.5)
-
-            if agent_decision == rl_dir:
-                # 일치: confidence 부스트 (최대 +10%)
-                boost = min(0.10, rl_strength * 0.15)
-                output["decision"]["confidence"] = min(1.0, orig_conf + boost)
-                log(f"RL 일치 → confidence {orig_conf:.2f} → {output['decision']['confidence']:.2f}")
-            elif rl_dir == "hold":
-                pass  # RL이 hold이면 간섭 안 함
-            elif agent_decision == "hold" and rl_strength > 0.5:
-                # 에이전트 관망인데 RL이 강한 시그널 → advisory 메모만
-                output["decision"]["rl_override_hint"] = rl_dir
-                log(f"RL 강한 시그널({rl_dir}, {rl_strength:.2f}) — advisory 메모 추가")
-            else:
-                # 불일치: confidence 감소 (최대 -20%)
-                dampen = min(0.20, rl_strength * 0.25)
-                output["decision"]["confidence"] = max(0.0, orig_conf - dampen)
-                log(f"RL 불일치({rl_dir}) → confidence {orig_conf:.2f} → {output['decision']['confidence']:.2f}")
-        else:
-            log("RL advisory: 모델 없음 또는 비활성")
-    except Exception as e:
-        log(f"Phase 2.5 RL advisory 예외: {e}")
-
+    
     agent_result_path = snapshot_dir / "agent_result.json"
     with open(agent_result_path, "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
-
+        
     # Phase 3: 매매 실행
     decision = output["decision"]["decision"]
     reason = output["decision"]["reason"]
@@ -532,8 +461,20 @@ def main():
         except Exception:
             pass
 
+    # RL 블렌드 정보
+    rl_blend = output["decision"].get("rl_blend", {})
+    rl_line = ""
+    if rl_blend.get("used"):
+        rl_act = rl_blend.get("rl_action", 0)
+        rl_interp = rl_blend.get("rl_interpretation", "?")
+        rl_agree = "동의" if rl_blend.get("agreement") else "불일치"
+        rl_override = rl_blend.get("override")
+        rl_line = f"- RL 시그널: {rl_act:+.3f} ({rl_interp}) [{rl_agree}]"
+        if rl_override:
+            rl_line += f" → {rl_override}"
+        rl_line += "\n"
+
     summary_msg = f"[{agent_name}] {decision.upper()} 결정 ({confidence}%)"
-    rl_line = f"- RL: {rl_advisory['direction']}({rl_advisory['action']:+.4f})\n" if rl_advisory else ""
     detail_msg = (
         f"💡 근거: {reason}\n\n"
         f"📊 시장 현황:\n"
@@ -545,9 +486,9 @@ def main():
         f"- KRW 잔고: {int(krw_bal):,}원\n"
         f"- BTC 잔고: {btc_bal:.6f} BTC\n\n"
         f"🤖 감독 상태:\n"
+        f"{rl_line}"
         f"- 사용자 피드백 Bias: {user_bias:+.2f} (음수:보수적, 양수:공격적)\n"
-        f"- {switch_info}\n"
-        f"{rl_line}\n"
+        f"- {switch_info}\n\n"
         f"ℹ️ 피드백을 주시려면 'python scripts/feedback.py +0.5' 를 실행하세요."
     )
     
@@ -557,8 +498,6 @@ def main():
         pass
         
     # Phase 5: Supabase 기록 (decisions + market_data + execution_logs)
-    supabase_url = os.environ.get("SUPABASE_URL", "")
-    supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
     if supabase_url and supabase_key:
         log("Phase 5: Supabase 기록...")
 
@@ -585,18 +524,18 @@ def main():
                 "decision": DECISION_MAP.get(decision, decision),
                 "confidence": round(confidence_val, 2),
                 "reason": " | ".join(reason_parts),
-                "current_price": int(market_data.get("ticker", {}).get("trade_price", 0)) or None,
+                "current_price": int(market_data.get("ticker", {}).get("trade_price") or market_data.get("current_price") or market_data.get("price") or 0) or None,
                 "rsi_value": market_data.get("indicators", {}).get("rsi_14"),
                 "fear_greed_value": market_data.get("fear_greed", {}).get("value"),
                 "sma20_price": int(market_data.get("indicators", {}).get("sma_20")) if market_data.get("indicators", {}).get("sma_20") else None,
                 "market_data_snapshot": json.dumps({
                     "buy_score": buy_score,
                     "external": ext_summary,
-                    "rl_advisory": rl_advisory,
+                    "rl_blend": dec.get("rl_blend"),
                     "snapshot_dir": str(snapshot_dir),
                 }, ensure_ascii=False),
                 "cycle_id": _CYCLE_ID,
-                "source": "agent",
+                "source": "agent+rl" if dec.get("rl_blend", {}).get("used") else "agent",
             }
             # 외부 정보 및 매수 점수와 직접 연결 (FK)
             if output.get("external_signal_id"):
@@ -613,32 +552,6 @@ def main():
             )
             if resp.status_code in (200, 201):
                 log("decisions 기록 완료")
-                # 임베딩 생성 (RAG 벡터검색용)
-                try:
-                    resp_data_for_emb = resp.json()
-                    emb_decision_id = None
-                    if isinstance(resp_data_for_emb, list) and resp_data_for_emb:
-                        emb_decision_id = resp_data_for_emb[0].get("id")
-                    elif isinstance(resp_data_for_emb, dict):
-                        emb_decision_id = resp_data_for_emb.get("id")
-
-                    if emb_decision_id:
-                        from scripts.save_decision import generate_state_embedding, _update_embedding_via_sql
-                        emb_data = {
-                            "current_price": market_data.get("ticker", {}).get("trade_price"),
-                            "change_rate_24h": market_data.get("ticker", {}).get("signed_change_rate"),
-                            "rsi_14": market_data.get("indicators", {}).get("rsi_14"),
-                            "sma_20": market_data.get("indicators", {}).get("sma_20"),
-                            "fear_greed_value": market_data.get("fear_greed", {}).get("value"),
-                            "volume_24h": market_data.get("ticker", {}).get("acc_trade_volume_24h"),
-                            "news_sentiment": market_data.get("news", {}).get("overall_sentiment"),
-                        }
-                        emb_text, emb_vector = generate_state_embedding(emb_data)
-                        if emb_vector:
-                            _update_embedding_via_sql(emb_decision_id, emb_vector, emb_text)
-                            log("임베딩 생성 완료 (RAG)")
-                except Exception as emb_e:
-                    log(f"임베딩 생성 실패 (비치명적): {emb_e}")
             else:
                 log(f"decisions 기록 실패 (HTTP {resp.status_code}): {resp.text[:300]}")
                 pipeline_errors.append({"phase": "phase5", "source": "decisions", "error": resp.text[:300]})
@@ -715,37 +628,8 @@ def main():
     log("Phase 6: 전환 성과 평가...")
     subprocess.run([sys.executable, "scripts/evaluate_switches.py"], cwd=str(PROJECT_DIR), check=False)
     
-    # Phase 6.5: RL 온라인 학습 버퍼
-    if rl_advisory:
-        try:
-            from rl_hybrid.rl.online_buffer import OnlineExperienceBuffer
-            log("Phase 6.5: RL 온라인 학습 버퍼...")
-            buf = OnlineExperienceBuffer()
-            buf.add_experience(
-                market_data=market_data,
-                external_data=external_data,
-                portfolio=portfolio,
-                agent_state=agent_state_for_rl,
-                rl_action=rl_advisory["action"],
-                agent_decision=decision,
-            )
-            stats = buf.get_stats()
-            log(f"온라인 버퍼: {stats['total']}/{stats['trigger_size']}건 (outcome: {stats['outcome_filled']}건)")
-            if buf.should_train():
-                log("Phase 6.5: RL 미세 학습 시작...")
-                result = buf.micro_train()
-                log(f"RL 미세 학습: {result.get('message', 'N/A')}")
-        except Exception as e:
-            log(f"Phase 6.5 온라인 학습 예외: {e}")
-
     log("═══ 에이전트 모드 완료 ═══")
     print(json.dumps(output, ensure_ascii=False, indent=2))
 
 if __name__ == "__main__":
-    import argparse as _ap
-    _parser = _ap.ArgumentParser()
-    _parser.add_argument("--dry-run", action="store_true", help="DRY_RUN=true 강제 (포어그라운드 테스트용)")
-    _args = _parser.parse_args()
-    if _args.dry_run:
-        os.environ["DRY_RUN"] = "true"
     main()

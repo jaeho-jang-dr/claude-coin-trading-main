@@ -2,7 +2,8 @@
 🔥 공격적 전략 에이전트
 
 빈번한 매매, 빠른 익절/손절. 고위험 고수익.
-매수 임계: 45점, 손절: -3%, 강제 손절: -7%
+매수 임계: 40점, 손절: -3%, 강제 손절: -7%
+v2 조정(2026-03-11): 45→40
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ class AggressiveAgent(BaseStrategyAgent):
     fgi_threshold = 60
     rsi_threshold = 50
     sma_deviation_pct = -1.0
-    buy_score_threshold = 45
+    buy_score_threshold = 40
     macd_bonus = False
 
     # 매도 조건

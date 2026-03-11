@@ -2,7 +2,8 @@
 ⚖️ 보통 전략 에이전트
 
 조정장에서도 매수 가능. 균형잡힌 수익/리스크.
-매수 임계: 55점, 손절: -5%, 강제 손절: -10%
+매수 임계: 50점, 손절: -5%, 강제 손절: -10%
+v2 조정(2026-03-11): 55→50, SMA -3→-2
 """
 
 from __future__ import annotations
@@ -16,11 +17,11 @@ class ModerateAgent(BaseStrategyAgent):
     emoji = "⚖️"
     description = "보통 — 조정장 매수, 균형 수익/리스크"
 
-    # 매수 조건
+    # 매수 조건 (v2: 기준 완화)
     fgi_threshold = 45
     rsi_threshold = 40
-    sma_deviation_pct = -3.0
-    buy_score_threshold = 55
+    sma_deviation_pct = -2.0
+    buy_score_threshold = 50
     macd_bonus = True
 
     # 매도 조건

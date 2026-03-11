@@ -21,6 +21,9 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import hashlib
+import secrets
+
 from dotenv import load_dotenv
 import requests
 
@@ -33,6 +36,13 @@ load_dotenv(PROJECT_DIR / ".env")
 
 WEB_DIR = PROJECT_DIR / "web"
 PORT = 5555
+
+# 간단한 토큰 인증: .env의 WEB_AUTH_TOKEN 또는 자동 생성
+AUTH_TOKEN = os.environ.get("WEB_AUTH_TOKEN", "")
+AUTH_ENABLED = bool(AUTH_TOKEN)
+
+# 인증 불필요 경로 (QR 페이지만)
+AUTH_EXEMPT_PATHS = {"/qr.html"}
 
 
 def get_local_ip():
@@ -119,6 +129,30 @@ def api_market():
         return {"error": str(e)}
 
 
+def api_fgi():
+    """Fear & Greed Index 조회 (Alternative.me 직접 호출)."""
+    try:
+        r = requests.get(
+            "https://api.alternative.me/fng/",
+            params={"limit": "7", "format": "json"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()["data"]
+        current = data[0]
+        return {
+            "value": int(current["value"]),
+            "label": current["value_classification"],
+            "timestamp": current["timestamp"],
+            "history": [
+                {"value": int(d["value"]), "label": d["value_classification"]}
+                for d in data
+            ],
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def api_decisions():
     """최근 의사결정 10건."""
     return supabase_get("decisions", "select=*&order=created_at.desc&limit=10")
@@ -155,7 +189,34 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # 로그 무시
 
+    def _check_auth(self):
+        """토큰 인증 확인. 인증 실패 시 True(차단), 성공 시 False."""
+        if not AUTH_ENABLED:
+            return False
+        parsed = urlparse(self.path)
+        if parsed.path in AUTH_EXEMPT_PATHS:
+            return False
+        # ?token=xxx 쿼리 파라미터 또는 Authorization 헤더
+        qs = parse_qs(parsed.query)
+        token = qs.get("token", [None])[0]
+        if not token:
+            auth_header = self.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[7:]
+        if token == AUTH_TOKEN:
+            return False
+        # 인증 실패
+        body = json.dumps({"error": "unauthorized"}).encode("utf-8")
+        self.send_response(401)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", len(body))
+        self.end_headers()
+        self.wfile.write(body)
+        return True
+
     def do_GET(self):
+        if self._check_auth():
+            return
         parsed = urlparse(self.path)
         path = parsed.path
 
@@ -168,6 +229,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             super().do_GET()
 
     def do_POST(self):
+        if self._check_auth():
+            return
         parsed = urlparse(self.path)
         path = parsed.path
         content_length = int(self.headers.get("Content-Length", 0))
@@ -215,6 +278,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         handlers = {
             "/api/portfolio": api_portfolio,
             "/api/market": api_market,
+            "/api/fgi": api_fgi,
             "/api/decisions": api_decisions,
             "/api/status": api_status,
         }
@@ -287,8 +351,9 @@ def _run_analysis():
 
 def main():
     local_ip = get_local_ip()
-    dashboard_url = f"http://{local_ip}:{PORT}"
-    remote_url = f"http://{local_ip}:{PORT}/remote.html"
+    token_qs = f"?token={AUTH_TOKEN}" if AUTH_ENABLED else ""
+    dashboard_url = f"http://{local_ip}:{PORT}{token_qs}"
+    remote_url = f"http://{local_ip}:{PORT}/remote.html{token_qs}"
     qr_url = f"http://{local_ip}:{PORT}/qr.html"
 
     print(f"\n{'='*50}")
@@ -297,6 +362,10 @@ def main():
     print(f"  대시보드:     {dashboard_url}")
     print(f"  리모트 컨트롤: {remote_url}")
     print(f"  QR 코드:      {qr_url}")
+    if AUTH_ENABLED:
+        print(f"  인증 토큰:    {AUTH_TOKEN}")
+    else:
+        print(f"  인증: 비활성 (.env에 WEB_AUTH_TOKEN 설정으로 활성화)")
     print(f"{'='*50}")
     print(f"  Ctrl+C 로 종료\n")
 

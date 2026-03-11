@@ -2,7 +2,8 @@
 🛡️ 보수적 전략 에이전트
 
 폭락장 저점 매수만. 발동 빈도 낮지만 자산 보전 우선.
-매수 임계: 70점, 손절: -5%, 강제 손절: -10%
+매수 임계: 60점, 손절: -5%, 강제 손절: -10%
+v2 조정(2026-03-11): 70→60 (놓친 기회 10건 반영), FGI 30→35, RSI 30→35, SMA -5→-3
 """
 
 from __future__ import annotations
@@ -16,11 +17,11 @@ class ConservativeAgent(BaseStrategyAgent):
     emoji = "🛡️"
     description = "보수적 — 폭락장 저점 매수, 자산 보전 우선"
 
-    # 매수 조건
-    fgi_threshold = 30
-    rsi_threshold = 30
-    sma_deviation_pct = -5.0
-    buy_score_threshold = 70
+    # 매수 조건 (v2: 기준 완화)
+    fgi_threshold = 35
+    rsi_threshold = 35
+    sma_deviation_pct = -3.0
+    buy_score_threshold = 60
     macd_bonus = False
 
     # 매도 조건

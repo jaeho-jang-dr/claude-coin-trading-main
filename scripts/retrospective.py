@@ -287,7 +287,6 @@ def update_buy_score_aftermath():
         params={
             "price_1h_after": "is.null",
             "recorded_at": f"lt.{cutoff_1h}",
-            "or": "(is_near_miss.eq.true,was_ai_vetoed.eq.true)",
             "select": "id,price_at_decision,recorded_at,action",
             "limit": "100",
         },
@@ -334,7 +333,6 @@ def update_buy_score_aftermath():
             "price_4h_after": "is.null",
             "price_1h_after": "not.is.null",
             "recorded_at": f"lt.{cutoff_4h}",
-            "or": "(is_near_miss.eq.true,was_ai_vetoed.eq.true)",
             "select": "id,price_at_decision,recorded_at,action",
             "limit": "100",
         },

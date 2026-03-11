@@ -54,8 +54,12 @@ h1 { font-size:28px; color:#58a6ff; margin-bottom:8px; }
 <script>
 var host = window.location.hostname;
 var port = window.location.port || '5555';
-var dashboardUrl = 'http://' + host + ':' + port + '/';
-var remoteUrl = 'http://' + host + ':' + port + '/remote.html';
+// token은 서버 시작 시 콘솔에 출력된 URL에서 확인
+var params = new URLSearchParams(window.location.search);
+var token = params.get('token');
+var tokenQs = token ? '?token=' + token : '';
+var dashboardUrl = 'http://' + host + ':' + port + '/' + tokenQs;
+var remoteUrl = 'http://' + host + ':' + port + '/remote.html' + tokenQs;
 
 document.getElementById('url-dashboard').textContent = dashboardUrl;
 document.getElementById('url-remote').textContent = remoteUrl;

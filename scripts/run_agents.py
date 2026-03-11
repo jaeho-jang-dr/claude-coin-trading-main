@@ -436,12 +436,14 @@ def main():
 
     # Phase 2.5: RL 모델 어드바이저리
     rl_advisory = None
+    agent_state_for_rl = {}
     try:
+        market_state = result.get("market_state", {})
         agent_state_for_rl = {
             "active_agent": output.get("active_agent", "conservative"),
-            "danger_score": output.get("danger_score", 50),
-            "opportunity_score": output.get("opportunity_score", 50),
-            "consecutive_losses": output.get("consecutive_losses", 0),
+            "danger_score": market_state.get("danger_score", 50),
+            "opportunity_score": market_state.get("opportunity_score", 50),
+            "consecutive_losses": market_state.get("consecutive_losses", 0),
         }
         rl_advisory = get_rl_advisory(market_data, external_data, portfolio, agent_state_for_rl)
         if rl_advisory:
@@ -563,6 +565,7 @@ def main():
         log("Phase 5: Supabase 기록...")
 
         # 5a. decisions 테이블
+        resp = None
         try:
             DECISION_MAP = {"buy": "매수", "sell": "매도", "hold": "관망"}
             dec = output["decision"]
@@ -649,7 +652,7 @@ def main():
         # 5a-2. market_context_log 테이블 (결정 시점 전체 시장 스냅샷)
         try:
             decision_id = None
-            if resp.ok:
+            if resp is not None and resp.ok:
                 try:
                     resp_data = resp.json()
                     if isinstance(resp_data, list) and len(resp_data) > 0:
@@ -733,8 +736,8 @@ def main():
             log(f"온라인 버퍼: {stats['total']}/{stats['trigger_size']}건 (outcome: {stats['outcome_filled']}건)")
             if buf.should_train():
                 log("Phase 6.5: RL 미세 학습 시작...")
-                result = buf.micro_train()
-                log(f"RL 미세 학습: {result.get('message', 'N/A')}")
+                train_result = buf.micro_train()
+                log(f"RL 미세 학습: {train_result.get('message', 'N/A')}")
         except Exception as e:
             log(f"Phase 6.5 온라인 학습 예외: {e}")
 

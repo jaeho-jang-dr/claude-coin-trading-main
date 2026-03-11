@@ -72,6 +72,10 @@ class BitcoinTradingEnv(gym.Env):
         self.end_idx = len(candles) - 1
         if max_steps:
             self.end_idx = min(self.start_idx + max_steps, self.end_idx)
+        # Guard: very short datasets (< lookback candles)
+        if self.end_idx <= self.start_idx:
+            self.end_idx = len(candles) - 1
+            self.start_idx = min(self.start_idx, self.end_idx - 1)
 
         # 관측 공간: 42차원 (현재 상태) + lookback * 5 (과거 OHLCV 압축)
         # 간소화: 42차원만 사용 (과거 정보는 지표에 이미 반영)
@@ -97,6 +101,10 @@ class BitcoinTradingEnv(gym.Env):
         self.action_history = []
         self.trade_count = 0
 
+        # 외부 데이터 캐시 (signals가 없으면 매 스텝 동일한 dict 반환)
+        self._cached_external_data: dict | None = None
+        self._cached_external_step: int = -1
+
     def reset(self, seed=None, options=None):
         """환경 리셋"""
         super().reset(seed=seed)
@@ -114,6 +122,8 @@ class BitcoinTradingEnv(gym.Env):
         self.total_value_history = [self.initial_balance]
         self.action_history = []
         self.trade_count = 0
+        self._cached_external_data = None
+        self._cached_external_step = -1
 
         self.reward_calc.reset(self.initial_balance)
 
@@ -219,12 +229,18 @@ class BitcoinTradingEnv(gym.Env):
         """현재 포트폴리오 가치 (KRW)"""
         return self.krw_balance + self.btc_balance * price
 
+    # 재사용 가능한 고정 dict 템플릿 (매 스텝 동일한 부분)
+    _STATIC_ORDERBOOK = {"ratio": 1.0}
+    _STATIC_TRADE_PRESSURE = {"buy_volume": 1, "sell_volume": 1}
+    _STATIC_ETH_BTC = {"eth_btc_z_score": 0}
+
     def _get_observation(self) -> np.ndarray:
         """현재 관측 벡터 생성"""
         candle = self.candles[self.current_step]
         price = candle["close"]
 
         # 시장 데이터 → StateEncoder 호환 형식
+        # 내부 dict를 매번 새로 만들되, 고정 부분은 클래스 상수 참조
         market_data = {
             "current_price": price,
             "change_rate_24h": candle.get("change_rate", 0),
@@ -254,30 +270,35 @@ class BitcoinTradingEnv(gym.Env):
                 "atr": candle.get("atr", 0),
             },
             "indicators_4h": {"rsi_14": candle.get("rsi_14", 50)},
-            "orderbook": {"ratio": 1.0},
-            "trade_pressure": {"buy_volume": 1, "sell_volume": 1},
-            "eth_btc_analysis": {"eth_btc_z_score": 0},
+            "orderbook": self._STATIC_ORDERBOOK,
+            "trade_pressure": self._STATIC_TRADE_PRESSURE,
+            "eth_btc_analysis": self._STATIC_ETH_BTC,
         }
 
-        # 외부 데이터: 실제 시그널이 있으면 사용, 없으면 기본 상수값
+        # 외부 데이터: 실제 시그널이 있으면 사용, 없으면 기본 상수값 (캐시됨)
         external_data = self._build_external_data()
 
         # 포트폴리오
         total_value = self._portfolio_value(price)
         btc_eval = self.btc_balance * price
-        portfolio = {
-            "krw_balance": self.krw_balance,
-            "holdings": [{
+        if self.btc_balance > 0:
+            holdings = [{
                 "currency": "BTC",
                 "balance": self.btc_balance,
-                "avg_buy_price": price,  # 시뮬레이션 간소화
+                "avg_buy_price": price,
                 "eval_amount": btc_eval,
                 "profit_loss_pct": 0,
-            }] if self.btc_balance > 0 else [],
+            }]
+        else:
+            holdings = []
+
+        portfolio = {
+            "krw_balance": self.krw_balance,
+            "holdings": holdings,
             "total_eval": total_value,
         }
 
-        # 에이전트 상태
+        # 에이전트 상태 — 재사용 가능한 dict (trade_count만 변동)
         agent_state = {
             "danger_score": 30,
             "opportunity_score": 30,
@@ -305,7 +326,18 @@ class BitcoinTradingEnv(gym.Env):
 
         self.external_signals가 있고 현재 스텝에 데이터가 있으면
         실제 값을 사용하고, 없으면 기본 상수값을 반환한다.
+
+        Caching: 외부 시그널이 없을 때는 매 스텝 동일한 dict이므로 캐시.
+        시그널이 있을 때는 스텝별로 다르므로 스텝 기준 캐시.
         """
+        # 캐시 히트 확인
+        if self._cached_external_data is not None:
+            if self.external_signals is None:
+                # 시그널 없으면 항상 동일 → 캐시 반환
+                return self._cached_external_data
+            if self._cached_external_step == self.current_step:
+                return self._cached_external_data
+
         # 기본값
         fgi = 50
         news_score = 0
@@ -345,7 +377,7 @@ class BitcoinTradingEnv(gym.Env):
             else:
                 news_score = 0
 
-        return {
+        result = {
             "sources": {
                 "fear_greed": {"current": {"value": float(fgi)}},
                 "news_sentiment": {"sentiment_score": float(news_score)},
@@ -362,6 +394,10 @@ class BitcoinTradingEnv(gym.Env):
             "external_signal": {"total_score": float(fusion)},
             "nvt_signal": float(nvt),
         }
+
+        self._cached_external_data = result
+        self._cached_external_step = self.current_step
+        return result
 
     def _get_info(self) -> dict:
         """디버깅/로깅용 info dict"""
@@ -394,7 +430,15 @@ class BitcoinTradingEnv(gym.Env):
                 f"거래: {info['trade_count']}회"
             )
         elif self.render_mode == "human":
-            print(self.render.__func__(self))
+            # Build state string directly (avoid recursion)
+            price = self.candles[self.current_step]["close"]
+            portfolio_value = self._portfolio_value(price)
+            state = (f"Step {self.current_step} | "
+                     f"Balance: {self.krw_balance:,.0f} | "
+                     f"BTC: {self.btc_balance:.6f} | "
+                     f"Value: {portfolio_value:,.0f}")
+            print(state)
+            return state
 
     def get_episode_stats(self) -> dict:
         """에피소드 통계"""

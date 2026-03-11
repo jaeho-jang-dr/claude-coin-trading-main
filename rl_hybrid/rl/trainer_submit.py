@@ -88,7 +88,8 @@ def evaluate_on_real_data(model_path: str, algo: str, days: int = 180,
     )
 
     TraderClass = get_trader_class(algo)
-    trader = TraderClass(env=env, model_path=model_path)
+    load_path = model_path.removesuffix(".zip")  # SB3 adds .zip internally
+    trader = TraderClass(env=env, model_path=load_path)
     stats = evaluate(trader, env, episodes=episodes)
 
     return {

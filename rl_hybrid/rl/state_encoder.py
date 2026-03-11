@@ -176,7 +176,7 @@ class StateEncoder:
                 float(trade_pressure.get("sell_volume", 1)),
                 1.0,
             ),
-            float(whale_data.get("whale_score", {}).get("score", 0) + 30) / 60,
+            float(((whale_data.get("whale_score", {}).get("score", 0) if isinstance(whale_data.get("whale_score"), dict) else (whale_data.get("whale_score", 0) if isinstance(whale_data, dict) else 0)) + 30)) / 60,
 
             # 감성/외부 지표
             float(fgi_data.get("current", {}).get("value", 50) if isinstance(fgi_data.get("current"), dict) else fgi_data.get("value", 50)),

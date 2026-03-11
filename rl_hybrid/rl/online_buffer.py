@@ -15,6 +15,7 @@
         result = buf.micro_train()
 """
 
+import fcntl
 import json
 import logging
 import os
@@ -48,8 +49,11 @@ class OnlineExperienceBuffer:
     def _load(self) -> list:
         if BUFFER_PATH.exists():
             try:
-                with open(BUFFER_PATH) as f:
-                    return json.load(f)
+                with open(BUFFER_PATH, "r") as f:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+                    data = json.load(f)
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    return data
             except Exception:
                 return []
         return []
@@ -57,7 +61,9 @@ class OnlineExperienceBuffer:
     def _save(self):
         MODEL_DIR.mkdir(parents=True, exist_ok=True)
         with open(BUFFER_PATH, "w") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
             json.dump(self.buffer, f, ensure_ascii=False, indent=1)
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
     def add_experience(
         self,
@@ -217,9 +223,12 @@ class OnlineExperienceBuffer:
                 result["message"] = f"미세 학습 성능 저하: {old_sharpe:.3f} → {new_sharpe:.3f}, 교체 안 함"
                 logger.info(result["message"])
 
-            # 버퍼 클리어
-            self.buffer.clear()
-            self._save()
+            if improved:
+                self.buffer.clear()
+                self._save()
+                logger.info("버퍼 초기화 (모델 교체됨)")
+            else:
+                logger.info("모델 미교체 — 버퍼 유지하여 다음 훈련에 누적")
 
             return result
 

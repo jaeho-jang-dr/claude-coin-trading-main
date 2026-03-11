@@ -223,7 +223,8 @@ def train(days: int, total_steps: int, balance: float, interval: str = "1h",
     return trader
 
 
-def train_all(days: int, total_steps: int, balance: float, interval: str = "1h"):
+def train_all(days: int, total_steps: int, balance: float, interval: str = "1h",
+              edge_cases: bool = False, synthetic_ratio: float = 0.3):
     """PPO, SAC, TD3 세 알고리즘을 동일 데이터로 훈련 후 비교
 
     최적 모델을 data/rl_models/best/best_model.zip에 저장하고,
@@ -235,7 +236,11 @@ def train_all(days: int, total_steps: int, balance: float, interval: str = "1h")
         logger.error("stable-baselines3를 설치하세요: pip install stable-baselines3")
         return
 
-    train_candles, eval_candles, train_signals, eval_signals = prepare_data(days, interval)
+    if edge_cases:
+        train_candles, eval_candles, train_signals, eval_signals = \
+            prepare_edge_case_data(days, interval, synthetic_ratio)
+    else:
+        train_candles, eval_candles, train_signals, eval_signals = prepare_data(days, interval)
     algos = ["ppo", "sac", "td3"]
     results = {}
 
@@ -447,7 +452,8 @@ if __name__ == "__main__":
     elif args.eval:
         evaluate(model_path=args.model, episodes=10)
     elif args.algo == "all":
-        train_all(args.days, args.steps, args.balance, args.interval)
+        train_all(args.days, args.steps, args.balance, args.interval,
+                  edge_cases=args.edge_cases, synthetic_ratio=args.synthetic_ratio)
     elif args.multi:
         # === 멀티 타임프레임 훈련 ===
         logger.info("=== 멀티 타임프레임 훈련 시작 ===")

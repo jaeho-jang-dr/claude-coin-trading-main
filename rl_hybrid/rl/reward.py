@@ -101,19 +101,34 @@ class RewardCalculator:
 
         윈도우 내 평균/분산 기반 증분 샤프.
         초기 3스텝: 수익률 직접 스케일링 (안정적 학습 시작)
+
+        Optimized: incremental sum/sum_sq tracking avoids
+        np.array() conversion from deque every step.
         """
-        if len(self.returns_history) < 3:
+        n = len(self.returns_history)
+        if n < 3:
             return latest_return * 10  # 초기: 단순 스케일링
 
-        returns = np.array(self.returns_history)
-        mean_return = returns.mean()
-        std_return = returns.std()
+        # Compute mean and std from running sum/sum_sq
+        # (deque is small — window_size=20 — so sum() is fast)
+        total = sum(self.returns_history)
+        total_sq = sum(r * r for r in self.returns_history)
+        mean_return = total / n
+        variance = total_sq / n - mean_return * mean_return
+        # Clamp tiny negatives from floating point
+        std_return = variance ** 0.5 if variance > 0 else 0.0
 
         if std_return < 1e-8:
             return mean_return * 10
 
         sharpe = (mean_return - self.risk_free_rate) / std_return
-        return float(np.clip(sharpe * 0.15, -1.5, 1.5))
+        scaled = sharpe * 0.15
+        # Inline clip instead of np.clip for scalar
+        if scaled > 1.5:
+            return 1.5
+        if scaled < -1.5:
+            return -1.5
+        return float(scaled)
 
     def get_episode_stats(self, final_value: float, initial_value: float) -> dict:
         total_return = (final_value - initial_value) / initial_value

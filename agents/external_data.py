@@ -287,6 +287,12 @@ class ExternalDataAgent:
 
     def __init__(self, snapshot_dir: Path | None = None):
         self.snapshot_dir = snapshot_dir
+        self._saved_signal_id: str | None = None
+
+    @property
+    def saved_signal_id(self) -> str | None:
+        """DB에 저장된 external_signal_log의 ID를 반환한다."""
+        return self._saved_signal_id
 
     def _get_cycle_id(self) -> str:
         """cycle_id를 반환한다. 실패 시 인라인 생성."""
@@ -699,12 +705,21 @@ class ExternalDataAgent:
                     "apikey": key,
                     "Authorization": f"Bearer {key}",
                     "Content-Type": "application/json",
-                    "Prefer": "return=minimal",
+                    "Prefer": "return=representation",
                 },
                 timeout=10,
             )
             if resp.status_code in (200, 201):
                 logging.info("external_signal_log 저장 완료")
+                # 저장된 레코드의 ID를 반환하여 decisions와 연결
+                try:
+                    resp_data = resp.json()
+                    if isinstance(resp_data, list) and resp_data:
+                        self._saved_signal_id = resp_data[0].get("id")
+                    elif isinstance(resp_data, dict):
+                        self._saved_signal_id = resp_data.get("id")
+                except Exception:
+                    pass
             else:
                 logging.warning(f"external_signal_log 저장 실패: {resp.status_code} {resp.text[:200]}")
         except Exception as e:

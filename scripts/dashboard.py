@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, redirect, render_template_string
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
@@ -391,6 +391,20 @@ def api_toggle(key):
     os.environ[env_key] = new_val
     label = "긴급정지" if key == "emergency_stop" else "DRY_RUN"
     return jsonify({"message": f"{label}: {new_val}", "value": new_val})
+
+
+@app.route("/rc")
+def rc_redirect():
+    """최신 RC URL로 리다이렉트 — 아이폰 홈화면 바로가기용"""
+    url_file = PROJECT_ROOT / "data" / "remote_url.txt"
+    try:
+        if url_file.exists():
+            url = url_file.read_text().strip()
+            if url and url.startswith("https://"):
+                return redirect(url)
+    except Exception:
+        pass
+    return "<h2>RC 세션 없음</h2><p>워치독이 재시작 중이거나 세션이 없습니다.</p>", 503
 
 
 @app.route("/api/rc-health")

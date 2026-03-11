@@ -59,44 +59,44 @@ MARKET = "KRW-BTC"
 UPBIT_API = "https://api.upbit.com/v1"
 UPBIT_WS = "wss://api.upbit.com/websocket/v1"
 
-# ── 단타 전용 파라미터 ─────────────────────────────────
+# ── 단타 전용 파라미터 (공격적 모드) ──────────────────────
 
-SHORT_TERM_BUDGET = int(os.getenv("SHORT_TERM_BUDGET", "500000"))  # 단타 전용 자금 50만원
-SHORT_TERM_MAX_TRADE = int(os.getenv("SHORT_TERM_MAX_TRADE", "200000"))  # 1회 최대 20만원
-SHORT_TERM_MAX_DAILY = int(os.getenv("SHORT_TERM_MAX_DAILY", "10"))  # 일일 최대 10회
-SHORT_TERM_STOP_LOSS = float(os.getenv("SHORT_TERM_STOP_LOSS", "0.8"))  # 손절 0.8%
-SHORT_TERM_TAKE_PROFIT = float(os.getenv("SHORT_TERM_TAKE_PROFIT", "0.8"))  # 익절 0.8% (v3: 1.5→0.8)
-SHORT_TERM_MAX_HOLD_MIN = int(os.getenv("SHORT_TERM_MAX_HOLD_MIN", "20"))  # 최대 보유 20분 (v3: 30→20)
+SHORT_TERM_BUDGET = int(os.getenv("SHORT_TERM_BUDGET", "1000000"))  # 단타 전용 자금 100만원 (공격: 50만→100만)
+SHORT_TERM_MAX_TRADE = int(os.getenv("SHORT_TERM_MAX_TRADE", "300000"))  # 1회 최대 30만원 (공격: 20만→30만)
+SHORT_TERM_MAX_DAILY = int(os.getenv("SHORT_TERM_MAX_DAILY", "20"))  # 일일 최대 20회 (공격: 10→20)
+SHORT_TERM_STOP_LOSS = float(os.getenv("SHORT_TERM_STOP_LOSS", "1.2"))  # 손절 1.2% (공격: 0.8→1.2, 여유 확대)
+SHORT_TERM_TAKE_PROFIT = float(os.getenv("SHORT_TERM_TAKE_PROFIT", "0.5"))  # 익절 0.5% (공격: 0.8→0.5, 빈번한 소폭 익절)
+SHORT_TERM_MAX_HOLD_MIN = int(os.getenv("SHORT_TERM_MAX_HOLD_MIN", "15"))  # 최대 보유 15분 (공격: 20→15, 빠른 회전)
 COMMISSION_PCT = 0.05  # Upbit 수수료 0.05%
-MIN_PROFIT_AFTER_FEE = COMMISSION_PCT * 2 + 0.1  # 수수료 왕복 + 최소 마진 0.1% = 0.2%
+MIN_PROFIT_AFTER_FEE = COMMISSION_PCT * 2 + 0.05  # 수수료 왕복 + 최소 마진 0.05% = 0.15% (공격: 0.2→0.15)
 
 # 뉴스 스캔 간격
-NEWS_SCAN_INTERVAL = 180  # 3분 (RSS 피드, API 제한 없음)
+NEWS_SCAN_INTERVAL = 120  # 2분 (공격: 3분→2분, 더 빈번한 스캔)
 
 # 급등/급락 감지 기준
-SPIKE_THRESHOLD_PCT = 0.8  # 최근 N분 내 0.8% 변동 (v2: 1.5→0.8)
+SPIKE_THRESHOLD_PCT = 0.5  # 최근 N분 내 0.5% 변동 (공격: 0.8→0.5, 작은 변동에도 진입)
 SPIKE_WINDOW_SEC = 300  # 5분 윈도우
 
 # 고래 감지 기준
-WHALE_THRESHOLD_KRW = 30_000_000  # 3000만원 이상 (v2: 500만→3000만)
-WHALE_RATIO_THRESHOLD = 0.7  # 금액 비율 70% 이상 (v2: 연속→비율)
+WHALE_THRESHOLD_KRW = 20_000_000  # 2000만원 이상 (공격: 3000만→2000만, 작은 고래도 추종)
+WHALE_RATIO_THRESHOLD = 0.6  # 금액 비율 60% 이상 (공격: 70→60, 진입 완화)
 WHALE_RATIO_WINDOW_SEC = 180  # 비율 판정 윈도우 3분
 
 # 매도 압력 방패
-SELL_PRESSURE_BLOCK_RATIO = 3.0  # 매도가 매수의 3배 이상이면 매수 차단 (v2 신규)
+SELL_PRESSURE_BLOCK_RATIO = 4.0  # 매도가 매수의 4배 이상이면 매수 차단 (공격: 3→4, 완화)
 
-# ── v4 안전 필터 ─────────────────────────────────────
+# ── v4 안전 필터 (공격적 완화) ─────────────────────────
 # 1. 하락 추세에서 whale 매수 차단
 TREND_SMA_CANDLE_COUNT = 20  # SMA20 계산용 일봉 수
 # 2. 뉴스 negative일 때 매수 차단 임계값
-NEWS_BLOCK_THRESHOLD = -0.3  # 감성 점수 이하면 매수 금지
+NEWS_BLOCK_THRESHOLD = -0.5  # 감성 점수 이하면 매수 금지 (공격: -0.3→-0.5, 완화)
 # 3. 극공포 시 매수 차단
-FGI_BLOCK_THRESHOLD = 10  # FGI 10 미만이면 매수 금지 (10 이상 허용)
+FGI_BLOCK_THRESHOLD = 5  # FGI 5 미만이면 매수 금지 (공격: 10→5, 완화)
 # 4. 타임아웃 전 조기 손절
-EARLY_STOP_LOSS_PCT = 0.2  # 보유 시간 15분 경과 + -0.2% 이하면 조기 청산
-EARLY_STOP_TIME_MIN = 15  # 조기 손절 판단 시작 시간
-# 5. 중복 진입 방지: 같은 전략으로 동시 2포지션 금지
-MAX_SAME_STRATEGY_POSITIONS = 1
+EARLY_STOP_LOSS_PCT = 0.3  # 보유 시간 10분 경과 + -0.3% 이하면 조기 청산 (공격: 0.2→0.3)
+EARLY_STOP_TIME_MIN = 10  # 조기 손절 판단 시작 시간 (공격: 15→10, 더 빠르게 판단)
+# 5. 중복 진입 방지: 같은 전략으로 동시 2포지션 허용
+MAX_SAME_STRATEGY_POSITIONS = 2  # (공격: 1→2, 동시 진입 허용)
 
 # ── 로깅 설정 ──────────────────────────────────────────
 

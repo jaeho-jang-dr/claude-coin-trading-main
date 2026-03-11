@@ -58,6 +58,10 @@ class AggressiveAgent(BaseStrategyAgent):
         btc_holding = portfolio.get("btc", {})
         if btc_holding.get("balance", 0) > 0:
             profit_pct = btc_holding.get("profit_pct", 0)
+            total_eval = portfolio.get("total_eval", 0)
+            btc_eval = btc_holding.get("eval_amount", 0)
+            btc_position_ratio = btc_eval / total_eval if total_eval > 0 else 0
+
             sell_eval = self.evaluate_sell(
                 profit_pct=profit_pct,
                 current_fgi=fgi,
@@ -65,6 +69,7 @@ class AggressiveAgent(BaseStrategyAgent):
                 buy_score=buy_score,
                 ai_signal_score=ai_score,
                 drop_context=drop_context,
+                btc_position_ratio=btc_position_ratio,
             )
             if sell_eval:
                 action = sell_eval["action"]
@@ -78,6 +83,22 @@ class AggressiveAgent(BaseStrategyAgent):
                             "side": "ask",
                             "market": "KRW-BTC",
                             "volume": btc_holding.get("balance", 0),
+                        },
+                        external_signal=external_signal,
+                        agent_name=f"{self.emoji} {self.name}",
+                    )
+                elif action == "sell_partial":
+                    sell_volume = round(btc_holding.get("balance", 0) * sell_eval.get("sell_ratio", 1/3), 8)
+                    return Decision(
+                        decision="sell",
+                        confidence=0.75,
+                        reason=sell_eval["reason"],
+                        buy_score=buy_score,
+                        trade_params={
+                            "side": "ask",
+                            "market": "KRW-BTC",
+                            "volume": sell_volume,
+                            "is_partial": True,
                         },
                         external_signal=external_signal,
                         agent_name=f"{self.emoji} {self.name}",

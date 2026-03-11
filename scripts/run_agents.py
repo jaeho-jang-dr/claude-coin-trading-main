@@ -350,6 +350,9 @@ def main():
                 "signal": external_data.get("external_signal", {}),
             },
             "snapshot_dir": str(snapshot_dir),
+            # DB 연결용 ID
+            "external_signal_id": ext_agent.saved_signal_id,
+            "buy_score_id": result.get("buy_score_id"),
         }
         
     except Exception as e:
@@ -488,6 +491,11 @@ def main():
                 "cycle_id": _CYCLE_ID,
                 "source": "agent",
             }
+            # 외부 정보 및 매수 점수와 직접 연결 (FK)
+            if output.get("external_signal_id"):
+                decision_row["external_signal_id"] = output["external_signal_id"]
+            if output.get("buy_score_id"):
+                decision_row["buy_score_id"] = output["buy_score_id"]
             decision_headers = supabase_headers()
             decision_headers["Prefer"] = "return=representation"
             resp = requests.post(

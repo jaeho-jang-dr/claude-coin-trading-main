@@ -175,8 +175,8 @@ send_keepalive() {
         sleep 1
     fi
 
-    # Escape 키 → bridge 통신 발생, 세션 오염 없음
-    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Escape
+    # Space BSpace (공백 입력 후 뒤로가기) → 터미널 포커스만 유지, 세션 종료 방지
+    tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Space BSpace
     sleep 1
 
     echo "$(date +%s)" > "$KEEPALIVE_FILE"
@@ -268,6 +268,14 @@ full_rebuild() {
 # =============================================================================
 # 메인 로직
 # =============================================================================
+
+# 1. 텔레그램 수동 재연결(/rc, /reconnect) 명령 확인
+if python3 "$PROJECT_DIR/scripts/check_telegram_cmd.py"; then
+    log "ACTION: Telegram /reconnect command received"
+    save_health "manual_restart" "User requested via Telegram"
+    fast_restart "User requested via Telegram"
+    exit 0
+fi
 
 STATUS=$(health_check)
 

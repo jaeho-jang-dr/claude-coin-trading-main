@@ -226,8 +226,8 @@ class Orchestrator:
         # 감독 오버라이드: 에이전트 결정을 최종 검증
         decision = self._override_decision(decision, drop_context, market_state)
 
-        # 매수 점수 상세 저장
-        agent.save_buy_score_detail(decision, market_data)
+        # 매수 점수 상세 저장 (ID 반환하여 decisions와 연결)
+        buy_score_id = agent.save_buy_score_detail(decision, market_data)
 
         # DCA 이력 추적
         self._track_dca(decision)
@@ -243,6 +243,7 @@ class Orchestrator:
             "decision": decision.to_dict(),
             "market_state": market_state,
             "drop_context": drop_context,
+            "buy_score_id": buy_score_id,
         }
 
     # ── 시장 상태 종합 평가 ────────────────────────────

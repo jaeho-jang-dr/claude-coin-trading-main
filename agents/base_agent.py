@@ -159,6 +159,10 @@ class BaseStrategyAgent(ABC):
 
         return breakdown
 
+    # ── 포지션 과다 분할 매도 ──
+    overweight_profit_threshold: float = 5.0   # 포지션 과다 시 분할 매도 트리거 수익률(%)
+    overweight_sell_ratio: float = 1 / 3       # 분할 매도 비율 (보유량의 1/3)
+
     def evaluate_sell(
         self,
         profit_pct: float,
@@ -167,6 +171,7 @@ class BaseStrategyAgent(ABC):
         buy_score: dict,
         ai_signal_score: int,
         drop_context: dict | None = None,
+        btc_position_ratio: float = 0.0,
     ) -> dict | None:
         """
         매도 조건을 평가한다. 매도해야 하면 dict 반환, 아니면 None.
@@ -180,6 +185,20 @@ class BaseStrategyAgent(ABC):
           - trend_falling: 하락 추세 지속 여부
         """
         dc = drop_context or {}
+
+        # ── 포지션 과다 분할 매도 (일반 목표 수익보다 우선) ──
+        max_position = float(os.getenv("MAX_POSITION_RATIO", "0.5"))
+        if btc_position_ratio > max_position and profit_pct >= self.overweight_profit_threshold:
+            return {
+                "action": "sell_partial",
+                "reason": (
+                    f"포지션 과다 분할 매도: BTC 비중 {btc_position_ratio:.0%} > "
+                    f"{max_position:.0%} 한도, 수익률 +{profit_pct:.1f}% >= "
+                    f"+{self.overweight_profit_threshold}% → 보유량 1/3 매도"
+                ),
+                "type": "overweight_rebalance",
+                "sell_ratio": self.overweight_sell_ratio,
+            }
 
         # 목표 수익 달성
         if profit_pct >= self.target_profit_pct:
@@ -347,7 +366,7 @@ class BaseStrategyAgent(ABC):
         self,
         decision: Decision,
         market_data: dict,
-    ) -> None:
+    ) -> str | None:
         """매수 점수 상세 내역을 buy_score_detail 테이블에 저장한다.
 
         DB 저장 실패가 매매 로직에 영향을 주지 않도록 전체를 try/except로 감싼다.
@@ -453,7 +472,7 @@ class BaseStrategyAgent(ABC):
                 "apikey": supabase_key,
                 "Authorization": f"Bearer {supabase_key}",
                 "Content-Type": "application/json",
-                "Prefer": "return=minimal",
+                "Prefer": "return=representation",
             }
 
             r = requests.post(
@@ -462,13 +481,24 @@ class BaseStrategyAgent(ABC):
                 json=row,
                 timeout=10,
             )
-            if not r.ok:
+            if r.ok:
+                # 저장된 레코드의 ID를 반환하여 decisions와 연결
+                try:
+                    resp_data = r.json()
+                    if isinstance(resp_data, list) and resp_data:
+                        return resp_data[0].get("id")
+                    elif isinstance(resp_data, dict):
+                        return resp_data.get("id")
+                except Exception:
+                    pass
+            else:
                 print(
                     f"[base_agent] buy_score_detail INSERT 실패 ({r.status_code}): {r.text[:300]}",
                     file=sys.stderr,
                 )
         except Exception as e:
             print(f"[base_agent] buy_score_detail 저장 예외: {e}", file=sys.stderr)
+        return None
 
     @abstractmethod
     def decide(

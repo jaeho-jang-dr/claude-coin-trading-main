@@ -19,4 +19,4 @@ google-generativeai>=0.8.0
 gymnasium>=0.29
 numpy>=1.24.0
 torch>=2.0
-# stable-baselines3>=2.0  # SB3 단일머신 훈련 시 활성화 (분산은 자체 PPO 사용)
+stable-baselines3>=2.0

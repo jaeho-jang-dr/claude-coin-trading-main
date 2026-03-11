@@ -27,10 +27,18 @@ if [ -f .env ]; then
   set -a; source .env; set +a
 fi
 
-# Python 가상환경 활성화
-if [ -f .venv/bin/activate ]; then
-  source .venv/bin/activate
+# Python 실행파일 결정 (venv 직접 사용, activate 불필요)
+if [ -f ".venv/Scripts/python.exe" ]; then
+    PYTHON=".venv/Scripts/python.exe"
+elif [ -f ".venv/bin/python" ]; then
+    PYTHON=".venv/bin/python"
+else
+    PYTHON="python3"
 fi
+
+# Windows cp949 → UTF-8 강제 (Python subprocess 출력 인코딩)
+export PYTHONIOENCODING=utf-8
+export PYTHONUTF8=1
 
 # 긴급 정지 확인
 if [ "${EMERGENCY_STOP:-false}" = "true" ]; then
@@ -53,7 +61,7 @@ echo "[$(date)] === cron 실행 시작 ===" > "$LOG_FILE"
 notify_error() {
   local msg="$1"
   echo "[$(date)] ERROR: ${msg}" >> "$LOG_FILE"
-  python3 scripts/notify_telegram.py error "cron 실행 오류" "$msg" 2>/dev/null || true
+  "$PYTHON" scripts/notify_telegram.py error "cron 실행 오류" "$msg" 2>/dev/null || true
 }
 
 # ══════════════════════════════════════════════════════════
@@ -64,7 +72,7 @@ echo "[$(date)] Python 에이전트 파이프라인 시작..." >> "$LOG_FILE"
 AGENT_OUTPUT=""
 AGENT_SUCCESS=false
 
-if AGENT_OUTPUT=$(python3 scripts/run_agents.py 2>>"$LOG_FILE"); then
+if AGENT_OUTPUT=$("$PYTHON" scripts/run_agents.py 2>>"$LOG_FILE"); then
   AGENT_SUCCESS=true
   echo "$AGENT_OUTPUT" > "$RESPONSE_FILE"
   echo "[$(date)] Python 에이전트 파이프라인 성공" >> "$LOG_FILE"
@@ -105,7 +113,7 @@ if [ "$AGENT_SUCCESS" = "false" ]; then
 
   # 4. Supabase에 결정 기록 + 이전 결정 성과 업데이트
   echo "[$(date)] Supabase 저장 중..." >> "$LOG_FILE"
-  echo "$RESPONSE" | python3 scripts/save_decision.py 2>>"$LOG_FILE" || {
+  echo "$RESPONSE" | "$PYTHON" scripts/save_decision.py 2>>"$LOG_FILE" || {
     echo "[$(date)] WARNING: Supabase 저장 실패 (치명적 아님)" >> "$LOG_FILE"
   }
 fi
@@ -114,7 +122,7 @@ fi
 # 회고: 과거 결정의 사후 가격 추적 (매 실행마다)
 # ══════════════════════════════════════════════════════════
 echo "[$(date)] 회고 분석 시작..." >> "$LOG_FILE"
-python3 scripts/retrospective.py >> "$LOG_FILE" 2>&1 || {
+"$PYTHON" scripts/retrospective.py >> "$LOG_FILE" 2>&1 || {
   echo "[$(date)] WARNING: 회고 분석 실패 (치명적 아님)" >> "$LOG_FILE"
 }
 

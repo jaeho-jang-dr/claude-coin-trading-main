@@ -20,26 +20,32 @@ if [ -f .env ]; then
   set -a; source .env; set +a
 fi
 
-# Python 가상환경 활성화
-if [ -f .venv/bin/activate ]; then
-  source .venv/bin/activate
-elif [ -f .venv/Scripts/activate ]; then
-  source .venv/Scripts/activate
+# Python 실행파일 결정 (venv 직접 사용, activate 불필요)
+if [ -f ".venv/Scripts/python.exe" ]; then
+    PYTHON=".venv/Scripts/python.exe"
+elif [ -f ".venv/bin/python" ]; then
+    PYTHON=".venv/bin/python"
+else
+    PYTHON="python3"
 fi
+
+# Windows cp949 → UTF-8 강제 (Python subprocess 출력 인코딩)
+export PYTHONIOENCODING=utf-8
+export PYTHONUTF8=1
 
 # 긴급 정지 확인 — 사용자 수동
 if [ "${EMERGENCY_STOP:-false}" = "true" ]; then
   echo "[STOP] 사용자 EMERGENCY_STOP 활성화됨. 실행 중단." >&2
-  python3 scripts/notify_telegram.py error "EMERGENCY_STOP" "사용자 긴급 정지 활성화로 에이전트 실행 중단" 2>/dev/null || true
+  "$PYTHON" scripts/notify_telegram.py error "EMERGENCY_STOP" "사용자 긴급 정지 활성화로 에이전트 실행 중단" 2>/dev/null || true
   exit 1
 fi
 
 # 긴급 정지 확인 — 감독 자동 (data/auto_emergency.json)
 AUTO_EMERGENCY_FILE="${PROJECT_DIR}/data/auto_emergency.json"
 if [ -f "$AUTO_EMERGENCY_FILE" ]; then
-  IS_ACTIVE=$(python3 -c "import json; d=json.load(open('$AUTO_EMERGENCY_FILE','r',encoding='utf-8')); print(d.get('active',False))" 2>/dev/null || echo "False")
+  IS_ACTIVE=$("$PYTHON" -c "import json; d=json.load(open('$AUTO_EMERGENCY_FILE','r',encoding='utf-8')); print(d.get('active',False))" 2>/dev/null || echo "False")
   if [ "$IS_ACTIVE" = "True" ]; then
-    REASON=$(python3 -c "import json; d=json.load(open('$AUTO_EMERGENCY_FILE','r',encoding='utf-8')); print(d.get('reason','알 수 없음'))" 2>/dev/null || echo "알 수 없음")
+    REASON=$("$PYTHON" -c "import json; d=json.load(open('$AUTO_EMERGENCY_FILE','r',encoding='utf-8')); print(d.get('reason','알 수 없음'))" 2>/dev/null || echo "알 수 없음")
     echo "[STOP] 감독 자동 긴급정지 활성 중: $REASON" >&2
     echo "[STOP] Orchestrator가 해제 조건을 평가합니다..." >&2
     # Orchestrator 내부에서 해제 여부를 판단하므로 여기서는 차단하지 않고
@@ -59,13 +65,13 @@ echo "[$(date)] ═══ 에이전트 모드 시작 ═══" >&2
 echo "[$(date)] Phase 1: 내부 데이터 수집..." >&2
 
 # 병렬 수집
-python3 scripts/collect_market_data.py > "${SNAPSHOT_DIR}/market_data.json" 2>/dev/null &
+"$PYTHON" scripts/collect_market_data.py > "${SNAPSHOT_DIR}/market_data.json" 2>/dev/null &
 PID_MARKET=$!
 
-python3 scripts/get_portfolio.py > "${SNAPSHOT_DIR}/portfolio.json" 2>/dev/null &
+"$PYTHON" scripts/get_portfolio.py > "${SNAPSHOT_DIR}/portfolio.json" 2>/dev/null &
 PID_PORTFOLIO=$!
 
-python3 scripts/collect_ai_signal.py > "${SNAPSHOT_DIR}/ai_signal.json" 2>/dev/null &
+"$PYTHON" scripts/collect_ai_signal.py > "${SNAPSHOT_DIR}/ai_signal.json" 2>/dev/null &
 PID_AI=$!
 
 # 병렬 완료 대기 + 에러 핸들링
@@ -78,7 +84,7 @@ echo "[$(date)] Phase 1 완료." >&2
 # ── Phase 2: 에이전트 실행 (Python) ──
 echo "[$(date)] Phase 2: 에이전트 파이프라인 실행..." >&2
 
-AGENT_RESULT=$(python3 -c "
+AGENT_RESULT=$("$PYTHON" -c "
 import json, sys, os
 sys.path.insert(0, '.')
 
@@ -180,7 +186,7 @@ AGENT_EXIT=$?
 
 if [ $AGENT_EXIT -ne 0 ]; then
   echo "[$(date)] Phase 2 실패 (exit $AGENT_EXIT)" >&2
-  python3 scripts/notify_telegram.py error "Agent Pipeline" "에이전트 파이프라인 실패 (exit $AGENT_EXIT)" 2>/dev/null || true
+  "$PYTHON" scripts/notify_telegram.py error "Agent Pipeline" "에이전트 파이프라인 실패 (exit $AGENT_EXIT)" 2>/dev/null || true
   exit 1
 fi
 
@@ -190,10 +196,10 @@ echo "[$(date)] Phase 2 완료." >&2
 echo "$AGENT_RESULT" > "${SNAPSHOT_DIR}/agent_result.json"
 
 # ── Phase 3: 매매 실행 ──
-DECISION=$(echo "$AGENT_RESULT" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['decision']['decision'])")
-REASON=$(echo "$AGENT_RESULT" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['decision']['reason'])")
-AGENT_NAME=$(echo "$AGENT_RESULT" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['active_agent'])")
-SWITCH_INFO=$(echo "$AGENT_RESULT" | python3 -c "
+DECISION=$(echo "$AGENT_RESULT" | "$PYTHON" -c "import sys,json; r=json.load(sys.stdin); print(r['decision']['decision'])")
+REASON=$(echo "$AGENT_RESULT" | "$PYTHON" -c "import sys,json; r=json.load(sys.stdin); print(r['decision']['reason'])")
+AGENT_NAME=$(echo "$AGENT_RESULT" | "$PYTHON" -c "import sys,json; r=json.load(sys.stdin); print(r['active_agent'])")
+SWITCH_INFO=$(echo "$AGENT_RESULT" | "$PYTHON" -c "
 import sys,json
 r=json.load(sys.stdin)
 sw = r.get('switch')
@@ -206,25 +212,25 @@ else:
 echo "[$(date)] Phase 3: 매매 실행 — $DECISION ($AGENT_NAME)" >&2
 
 if [ "$DECISION" = "buy" ]; then
-  SIDE=$(echo "$AGENT_RESULT" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['decision']['trade_params'].get('side','bid'))")
-  MARKET=$(echo "$AGENT_RESULT" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['decision']['trade_params'].get('market','KRW-BTC'))")
-  AMOUNT=$(echo "$AGENT_RESULT" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['decision']['trade_params'].get('amount',0))")
-  IS_DCA=$(echo "$AGENT_RESULT" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['decision']['trade_params'].get('is_dca',False))")
+  SIDE=$(echo "$AGENT_RESULT" | "$PYTHON" -c "import sys,json; r=json.load(sys.stdin); print(r['decision']['trade_params'].get('side','bid'))")
+  MARKET=$(echo "$AGENT_RESULT" | "$PYTHON" -c "import sys,json; r=json.load(sys.stdin); print(r['decision']['trade_params'].get('market','KRW-BTC'))")
+  AMOUNT=$(echo "$AGENT_RESULT" | "$PYTHON" -c "import sys,json; r=json.load(sys.stdin); print(r['decision']['trade_params'].get('amount',0))")
+  IS_DCA=$(echo "$AGENT_RESULT" | "$PYTHON" -c "import sys,json; r=json.load(sys.stdin); print(r['decision']['trade_params'].get('is_dca',False))")
 
   if [ "$AMOUNT" -gt 0 ] 2>/dev/null; then
     DCA_TAG=""
     [ "$IS_DCA" = "True" ] && DCA_TAG=" [DCA]"
     echo "[$(date)] 매수 실행: $MARKET $AMOUNT KRW${DCA_TAG}" >&2
-    python3 scripts/execute_trade.py bid "$MARKET" "$AMOUNT" 2>&1 | tee -a "$LOG_DIR/trade_${TIMESTAMP}.log" >&2
+    "$PYTHON" scripts/execute_trade.py bid "$MARKET" "$AMOUNT" 2>&1 | tee -a "$LOG_DIR/trade_${TIMESTAMP}.log" >&2
   fi
 
 elif [ "$DECISION" = "sell" ]; then
-  MARKET=$(echo "$AGENT_RESULT" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['decision']['trade_params'].get('market','KRW-BTC'))")
-  VOLUME=$(echo "$AGENT_RESULT" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['decision']['trade_params'].get('volume',0))")
+  MARKET=$(echo "$AGENT_RESULT" | "$PYTHON" -c "import sys,json; r=json.load(sys.stdin); print(r['decision']['trade_params'].get('market','KRW-BTC'))")
+  VOLUME=$(echo "$AGENT_RESULT" | "$PYTHON" -c "import sys,json; r=json.load(sys.stdin); print(r['decision']['trade_params'].get('volume',0))")
 
-  if python3 -c "assert float('$VOLUME') > 0" 2>/dev/null; then
+  if "$PYTHON" -c "assert float('$VOLUME') > 0" 2>/dev/null; then
     echo "[$(date)] 매도 실행: $MARKET $VOLUME BTC" >&2
-    python3 scripts/execute_trade.py ask "$MARKET" "$VOLUME" 2>&1 | tee -a "$LOG_DIR/trade_${TIMESTAMP}.log" >&2
+    "$PYTHON" scripts/execute_trade.py ask "$MARKET" "$VOLUME" 2>&1 | tee -a "$LOG_DIR/trade_${TIMESTAMP}.log" >&2
   fi
 
 else
@@ -234,20 +240,20 @@ fi
 # ── Phase 4: 텔레그램 알림 ──
 echo "[$(date)] Phase 4: 텔레그램 알림..." >&2
 
-BUY_SCORE=$(echo "$AGENT_RESULT" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['decision'].get('buy_score',{}).get('total','N/A'))")
-CONFIDENCE=$(echo "$AGENT_RESULT" | python3 -c "import sys,json; r=json.load(sys.stdin); print(round(r['decision'].get('confidence',0)*100))")
+BUY_SCORE=$(echo "$AGENT_RESULT" | "$PYTHON" -c "import sys,json; r=json.load(sys.stdin); print(r['decision'].get('buy_score',{}).get('total','N/A'))")
+CONFIDENCE=$(echo "$AGENT_RESULT" | "$PYTHON" -c "import sys,json; r=json.load(sys.stdin); print(round(r['decision'].get('confidence',0)*100))")
 
 SUMMARY="${AGENT_NAME} | ${DECISION} (${CONFIDENCE}%)"
 DETAIL="근거: ${REASON}
 매수점수: ${BUY_SCORE}
 ${SWITCH_INFO}"
 
-python3 scripts/notify_telegram.py trade "$SUMMARY" "$DETAIL" 2>/dev/null || true
+"$PYTHON" scripts/notify_telegram.py trade "$SUMMARY" "$DETAIL" 2>/dev/null || true
 
 # ── Phase 5: Supabase 기록 ──
 if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
   echo "[$(date)] Phase 5: Supabase 기록..." >&2
-  python3 -c "
+  "$PYTHON" -c "
 import json, os, requests, sys
 
 DECISION_MAP = {'buy': '매수', 'sell': '매도', 'hold': '관망'}
@@ -275,7 +281,7 @@ row = {
     'decision': kr_decision,
     'confidence': dec.get('confidence', 0),
     'reason': ' | '.join(reason_parts),
-    'current_price': market.get('current_price') or market.get('ticker', {}).get('trade_price', 0),
+    'current_price': int(market.get('current_price') or market.get('ticker', {}).get('trade_price', 0)),
     'rsi_value': market.get('indicators', {}).get('rsi_14'),
     'fear_greed_value': buy_score.get('fgi', {}).get('value'),
     'market_data_snapshot': json.dumps({
@@ -308,7 +314,7 @@ fi
 # ── Phase 5b: market_data 기록 ──
 if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
   echo "[$(date)] Phase 5b: market_data + execution_logs 기록..." >&2
-  python3 -c "
+  "$PYTHON" -c "
 import json, os, time, requests, sys
 
 supabase_url = os.environ['SUPABASE_URL']
@@ -385,7 +391,7 @@ fi
 
 # ── Phase 6: 과거 전환 성과 평가 (학습 데이터 축적) ──
 echo "[$(date)] Phase 6: 전환 성과 평가..." >&2
-python3 scripts/evaluate_switches.py 2>&2 || true
+"$PYTHON" scripts/evaluate_switches.py 2>&2 || true
 
 echo "[$(date)] ═══ 에이전트 모드 완료 ═══" >&2
 echo "$AGENT_RESULT"

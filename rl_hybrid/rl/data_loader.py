@@ -289,3 +289,139 @@ class HistoricalDataLoader:
         adx = HistoricalDataLoader._ema(dx, period)
 
         return adx, plus_di, minus_di
+
+    # === 외부 시그널 로드 ===
+
+    def load_external_signals(self, days: int = 365) -> list[dict]:
+        """Supabase external_signal_log에서 외부 시그널 로드
+
+        Args:
+            days: 수집 기간 (일)
+
+        Returns:
+            [{"recorded_at", "fgi_value", "news_sentiment", "whale_score",
+              "funding_rate", "long_short_ratio", "kimchi_premium_pct",
+              "macro_score", "eth_btc_score", "fusion_score"}, ...]
+            시간순 정렬 (과거 → 최근)
+        """
+        db_url = os.environ.get("SUPABASE_DB_URL")
+        if not db_url:
+            logger.warning("SUPABASE_DB_URL 미설정 — 외부 시그널 로드 불가")
+            return []
+
+        try:
+            import psycopg2
+        except ImportError:
+            logger.warning("psycopg2 미설치 — 외부 시그널 로드 불가")
+            return []
+
+        since = datetime.utcnow() - timedelta(days=days)
+
+        query = """
+            SELECT recorded_at, fgi_value, news_sentiment,
+                   whale_score, funding_rate, long_short_ratio,
+                   kimchi_premium_pct, macro_score, eth_btc_score,
+                   fusion_score, fusion_signal
+            FROM external_signal_log
+            WHERE recorded_at >= %s
+            ORDER BY recorded_at ASC
+        """
+
+        try:
+            conn = psycopg2.connect(db_url)
+            cur = conn.cursor()
+            cur.execute(query, (since,))
+            columns = [desc[0] for desc in cur.description]
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+
+            signals = [dict(zip(columns, row)) for row in rows]
+            logger.info(f"외부 시그널 로드 완료: {len(signals)}건 ({days}일)")
+            return signals
+
+        except Exception as e:
+            logger.warning(f"외부 시그널 로드 실패: {e}")
+            return []
+
+    def align_external_to_candles(
+        self, candles: list[dict], signals: list[dict]
+    ) -> list[dict]:
+        """캔들 타임스탬프에 외부 시그널을 forward-fill 정렬
+
+        각 캔들 시점에 해당하는 가장 최근 외부 시그널을 매핑한다.
+        캔들은 1h, 외부 시그널은 ~4h 간격이므로 한 시그널이 여러 캔들에 적용된다.
+
+        Args:
+            candles: 시간순 정렬된 캔들 데이터 (timestamp 키 포함)
+            signals: 시간순 정렬된 외부 시그널 (recorded_at 키 포함)
+
+        Returns:
+            캔들과 동일 길이의 외부 시그널 리스트. 매핑 불가 시 기본값 dict.
+        """
+        if not signals:
+            return [self._default_external_signal() for _ in candles]
+
+        # 시그널 타임스탬프를 파싱
+        parsed_signals = []
+        for sig in signals:
+            ts = sig["recorded_at"]
+            if isinstance(ts, str):
+                # ISO format 파싱
+                ts = ts.replace("T", " ").replace("Z", "")
+                if "+" in ts:
+                    ts = ts.split("+")[0]
+                ts = datetime.fromisoformat(ts)
+            parsed_signals.append((ts, sig))
+
+        result = []
+        sig_idx = 0
+
+        for candle in candles:
+            # 캔들 타임스탬프 파싱 (Upbit KST → UTC 변환)
+            candle_ts_str = candle.get("timestamp", "")
+            if isinstance(candle_ts_str, str) and candle_ts_str:
+                candle_ts_str = candle_ts_str.replace("T", " ")
+                candle_ts = datetime.fromisoformat(candle_ts_str)
+                # Upbit candle_date_time_kst → UTC (KST = UTC+9)
+                candle_ts_utc = candle_ts - timedelta(hours=9)
+            else:
+                # 파싱 불가 시 기본값
+                result.append(self._default_external_signal())
+                continue
+
+            # Forward-fill: 캔들 시점 이전의 가장 최근 시그널 찾기
+            while (
+                sig_idx < len(parsed_signals) - 1
+                and parsed_signals[sig_idx + 1][0] <= candle_ts_utc
+            ):
+                sig_idx += 1
+
+            if parsed_signals[sig_idx][0] <= candle_ts_utc:
+                result.append(parsed_signals[sig_idx][1])
+            else:
+                # 아직 시그널이 없는 초기 구간
+                result.append(self._default_external_signal())
+
+        logger.info(
+            f"외부 시그널 정렬 완료: {len(result)}건 "
+            f"(원본 시그널 {len(signals)}건)"
+        )
+        return result
+
+    @staticmethod
+    def _default_external_signal() -> dict:
+        """외부 시그널 기본값 (데이터 없을 때 사용)"""
+        return {
+            "fgi_value": 50,
+            "news_sentiment": "neutral",
+            "whale_score": 0,
+            "funding_rate": 0.0,
+            "long_short_ratio": 1.0,
+            "kimchi_premium_pct": 0.0,
+            "macro_score": 0,
+            "eth_btc_score": 0,
+            "fusion_score": 0,
+            "fusion_signal": "neutral",
+            "nvt_signal": 100.0,
+        }

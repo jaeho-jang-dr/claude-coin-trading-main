@@ -33,26 +33,52 @@ logger = logging.getLogger("rl.train_distributed")
 
 
 def prepare_data(days: int = 180, interval: str = "1h"):
-    """훈련/평가 데이터 분리"""
+    """훈련/평가 데이터 분리 (캔들 + 외부 시그널)
+
+    Returns:
+        (train_candles, eval_candles, train_signals, eval_signals)
+        *_signals는 None일 수 있음 (Supabase 미연결 시)
+    """
     loader = HistoricalDataLoader()
     logger.info(f"Upbit에서 {days}일 {interval} 캔들 로드 중...")
     raw_candles = loader.load_candles(days=days, interval=interval)
     candles = loader.compute_indicators(raw_candles)
 
+    # 외부 시그널 로드 및 정렬
+    aligned_signals = None
+    try:
+        raw_signals = loader.load_external_signals(days=days)
+        if raw_signals:
+            aligned_signals = loader.align_external_to_candles(candles, raw_signals)
+    except Exception as e:
+        logger.warning(f"외부 시그널 로드/정렬 실패 — 기본값 사용: {e}")
+
     split = int(len(candles) * 0.8)
     train_candles = candles[:split]
     eval_candles = candles[split:]
+
+    train_signals = None
+    eval_signals = None
+    if aligned_signals is not None:
+        train_signals = aligned_signals[:split]
+        eval_signals = aligned_signals[split:]
+        logger.info(
+            f"외부 시그널 분리 완료: 훈련={len(train_signals)}건, "
+            f"평가={len(eval_signals)}건"
+        )
+    else:
+        logger.info("외부 시그널 없음 — 환경에서 기본 상수값 사용")
 
     logger.info(
         f"데이터 준비 완료: 훈련={len(train_candles)}봉, 평가={len(eval_candles)}봉 "
         f"(총 {len(candles)}봉, {days}일 {interval})"
     )
-    return train_candles, eval_candles
+    return train_candles, eval_candles, train_signals, eval_signals
 
 
 def train(days: int, total_steps: int, balance: float, rollout_steps: int = 2048):
     """DistributedTrainer 기반 PPO 훈련"""
-    train_candles, eval_candles = prepare_data(days)
+    train_candles, eval_candles, train_signals, eval_signals = prepare_data(days)
 
     if len(train_candles) < 100:
         logger.error(f"훈련 데이터 부족: {len(train_candles)}봉")
@@ -70,7 +96,7 @@ def train(days: int, total_steps: int, balance: float, rollout_steps: int = 2048
         min_trajectories_for_update=1,  # 단일 노드이므로 1
     )
 
-    env = BitcoinTradingEnv(candles=train_candles, initial_balance=balance)
+    env = BitcoinTradingEnv(candles=train_candles, initial_balance=balance, external_signals=train_signals)
     buffer = TrajectoryBuffer(max_size=rollout_steps * 2)
 
     obs, info = env.reset()
@@ -180,7 +206,7 @@ def evaluate(
         trainer.load_model()
 
     if eval_candles is None:
-        _, eval_candles = prepare_data(180)
+        _, eval_candles, _, _ = prepare_data(180)
 
     if len(eval_candles) < 50:
         logger.warning(f"평가 데이터 부족: {len(eval_candles)}봉")
@@ -232,7 +258,7 @@ def evaluate(
 def backtest_baseline(eval_candles: list = None):
     """Buy & Hold 벤치마크"""
     if eval_candles is None:
-        _, eval_candles = prepare_data(180)
+        _, eval_candles, _, _ = prepare_data(180)
 
     if not eval_candles:
         logger.error("평가 데이터 없음")

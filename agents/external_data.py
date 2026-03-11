@@ -10,6 +10,7 @@
   - collect_macro.py → 매크로 경제 지표 (S&P500, DXY, 금, 유가, 10Y)
   - collect_crypto_signals.py → CoinGecko 거래량 이상 감지 (MCP 연동)
   - calculate_external_signal.py → Data Fusion 종합
+  + NVT Signal (blockchain.com API) — 온체인 가치 평가
   + 뉴스 감성 분석 (키워드 기반)
   + Supabase: 사용자 피드백, 과거 결정 성과
 
@@ -33,6 +34,36 @@ import requests
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = PROJECT_DIR / "scripts"
 PYTHON = sys.executable
+
+
+def _fetch_nvt_signal(timeout: int = 10) -> dict:
+    """blockchain.com API에서 NVT Signal 계산 (market_cap / tx_volume)"""
+    try:
+        import requests
+        mc_r = requests.get(
+            "https://api.blockchain.info/charts/market-cap?timespan=1days&format=json",
+            timeout=timeout,
+        )
+        tv_r = requests.get(
+            "https://api.blockchain.info/charts/estimated-transaction-volume-usd?timespan=1days&format=json",
+            timeout=timeout,
+        )
+        if mc_r.ok and tv_r.ok:
+            mc_vals = mc_r.json().get("values", [])
+            tv_vals = tv_r.json().get("values", [])
+            if mc_vals and tv_vals:
+                mc = mc_vals[-1]["y"]
+                tv = tv_vals[-1]["y"]
+                nvt = mc / tv if tv > 0 else 100.0
+                return {
+                    "nvt_signal": round(nvt, 1),
+                    "market_cap_usd": mc,
+                    "tx_volume_usd": tv,
+                    "interpretation": "overvalued" if nvt > 150 else "normal" if nvt > 50 else "undervalued",
+                }
+    except Exception:
+        pass
+    return {"nvt_signal": 100.0, "error": "fetch_failed"}
 
 
 def _run_script(script_name: str, args: list[str] | None = None, timeout: int = 60) -> dict:
@@ -334,6 +365,9 @@ class ExternalDataAgent:
                     results[name] = {"error": str(e)}
 
         elapsed = round(time.time() - start, 1)
+
+        # NVT Signal (blockchain.com)
+        results["nvt"] = _fetch_nvt_signal()
 
         # 뉴스 감성 분석 (키워드 기반 — 압축 전 원본으로 수행)
         news_sentiment = analyze_news_sentiment(results.get("news", {}))

@@ -41,6 +41,7 @@ class BitcoinTradingEnv(gym.Env):
         max_steps: int = None,
         lookback: int = 24,  # 과거 N봉 참조
         render_mode: str = None,
+        external_signals: list[dict] | None = None,
     ):
         """
         Args:
@@ -49,6 +50,8 @@ class BitcoinTradingEnv(gym.Env):
             max_steps: 에피소드 최대 스텝 (None이면 전체 데이터 사용)
             lookback: 관측에 포함할 과거 봉 수
             render_mode: "human" 또는 "ansi"
+            external_signals: 캔들과 동일 길이로 정렬된 외부 시그널 리스트.
+                None이면 기본 상수값 사용 (기존 동작).
         """
         super().__init__()
 
@@ -59,6 +62,7 @@ class BitcoinTradingEnv(gym.Env):
             candles = loader.compute_indicators(raw)
 
         self.candles = candles
+        self.external_signals = external_signals
         self.initial_balance = initial_balance
         self.lookback = lookback
         self.render_mode = render_mode
@@ -255,23 +259,8 @@ class BitcoinTradingEnv(gym.Env):
             "eth_btc_analysis": {"eth_btc_z_score": 0},
         }
 
-        # 외부 데이터 (시뮬레이션에서는 기본값)
-        external_data = {
-            "sources": {
-                "fear_greed": {"current": {"value": 50}},
-                "news_sentiment": {"sentiment_score": 0},
-                "whale_tracker": {"whale_score": {"score": 0}},
-                "binance_sentiment": {
-                    "funding_rate": {"current_rate": 0},
-                    "top_trader_long_short": {"current_ratio": 1.0},
-                    "kimchi_premium": {"premium_pct": 0},
-                },
-                "macro": {"analysis": {"macro_score": 0}},
-                "ai_signal": {"ai_composite_signal": {"score": 0}},
-                "coinmarketcap": {"btc_dominance": 50},
-            },
-            "external_signal": {"total_score": 0},
-        }
+        # 외부 데이터: 실제 시그널이 있으면 사용, 없으면 기본 상수값
+        external_data = self._build_external_data()
 
         # 포트폴리오
         total_value = self._portfolio_value(price)
@@ -299,6 +288,80 @@ class BitcoinTradingEnv(gym.Env):
         }
 
         return self.encoder.encode(market_data, external_data, portfolio, agent_state)
+
+    # === 감성 텍스트 → 숫자 변환 맵 ===
+    _SENTIMENT_MAP = {
+        "very_positive": 80,
+        "positive": 50,
+        "slightly_positive": 25,
+        "neutral": 0,
+        "slightly_negative": -25,
+        "negative": -50,
+        "very_negative": -80,
+    }
+
+    def _build_external_data(self) -> dict:
+        """외부 데이터 dict 생성 — StateEncoder 호환 형식
+
+        self.external_signals가 있고 현재 스텝에 데이터가 있으면
+        실제 값을 사용하고, 없으면 기본 상수값을 반환한다.
+        """
+        # 기본값
+        fgi = 50
+        news_score = 0
+        whale = 0
+        funding = 0.0
+        ls_ratio = 1.0
+        kimchi = 0.0
+        macro = 0
+        fusion = 0
+        nvt = 100.0
+        # eth_btc_score는 외부 시그널에 있지만 StateEncoder는
+        # market_data.eth_btc_analysis에서 읽으므로 여기선 사용 안 함
+
+        if (
+            self.external_signals is not None
+            and self.current_step < len(self.external_signals)
+        ):
+            sig = self.external_signals[self.current_step]
+
+            fgi = sig.get("fgi_value", 50) or 50
+            whale = sig.get("whale_score", 0) or 0
+            funding = sig.get("funding_rate", 0.0) or 0.0
+            ls_ratio = sig.get("long_short_ratio", 1.0) or 1.0
+            kimchi = sig.get("kimchi_premium_pct", 0.0) or 0.0
+            macro = sig.get("macro_score", 0) or 0
+            fusion = sig.get("fusion_score", 0) or 0
+            nvt = sig.get("nvt_signal", 100.0) or 100.0
+
+            # news_sentiment: 텍스트 → 숫자 변환
+            raw_sentiment = sig.get("news_sentiment", "neutral")
+            if isinstance(raw_sentiment, (int, float)):
+                news_score = float(raw_sentiment)
+            elif isinstance(raw_sentiment, str):
+                news_score = self._SENTIMENT_MAP.get(
+                    raw_sentiment.lower().strip(), 0
+                )
+            else:
+                news_score = 0
+
+        return {
+            "sources": {
+                "fear_greed": {"current": {"value": float(fgi)}},
+                "news_sentiment": {"sentiment_score": float(news_score)},
+                "whale_tracker": {"whale_score": {"score": float(whale)}},
+                "binance_sentiment": {
+                    "funding_rate": {"current_rate": float(funding)},
+                    "top_trader_long_short": {"current_ratio": float(ls_ratio)},
+                    "kimchi_premium": {"premium_pct": float(kimchi)},
+                },
+                "macro": {"analysis": {"macro_score": float(macro)}},
+                "ai_signal": {"ai_composite_signal": {"score": 0}},
+                "coinmarketcap": {"btc_dominance": 50},
+            },
+            "external_signal": {"total_score": float(fusion)},
+            "nvt_signal": float(nvt),
+        }
 
     def _get_info(self) -> dict:
         """디버깅/로깅용 info dict"""

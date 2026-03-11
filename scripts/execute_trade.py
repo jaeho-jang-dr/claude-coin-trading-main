@@ -288,7 +288,7 @@ def _record_trade_to_db(result: dict, source: str = "manual"):
 
         # decisions 테이블에 기록
         side = result.get("side", "")
-        action = "buy" if side == "bid" else "sell" if side == "ask" else "hold"
+        action_kr = "매수" if side == "bid" else "매도" if side == "ask" else "관망"
         dry_run = result.get("dry_run", True)
 
         # cycle_id 생성
@@ -300,7 +300,7 @@ def _record_trade_to_db(result: dict, source: str = "manual"):
             _cycle_id = datetime.now(KST).strftime("%Y%m%d-%H%M") + f"-{source}"
 
         decision_row = {
-            "action": action,
+            "decision": action_kr,
             "reason": f"[{source}] {result.get('market', 'KRW-BTC')} {result.get('amount', '')}",
             "confidence": 1.0 if source == "manual" else 0.5,
             "market": result.get("market", "KRW-BTC"),

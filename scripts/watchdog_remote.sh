@@ -220,7 +220,7 @@ fast_restart() {
     # 4) Claude 시작
     tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" "unset CLAUDECODE && claude --dangerously-skip-permissions" Enter
     log "OK: Claude starting..."
-    sleep 18
+    sleep 30
 
     # 5) /rc 활성화
     tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" "/rc" Enter
@@ -335,7 +335,6 @@ case "$STATUS" in
         tmux send-keys -t "$TMUX_SESSION:$TMUX_WINDOW" Enter
         sleep 8
 
-        local screen new_url
         screen=$(tmux capture-pane -t "$TMUX_SESSION:$TMUX_WINDOW" -p 2>/dev/null)
         new_url=$(extract_url)
 

@@ -86,7 +86,7 @@ class StateEncoder:
         portfolio: dict,
         agent_state: dict = None,
     ) -> np.ndarray:
-        """원시 데이터를 42차원 정규화 벡터로 변환
+        """원시 데이터를 정규화 벡터로 변환
 
         Returns:
             np.ndarray shape (42,), 값 범위 [0, 1]

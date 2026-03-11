@@ -24,21 +24,25 @@ class RewardCalculator:
     def __init__(
         self,
         window_size: int = 20,
-        risk_free_rate: float = 0.18 / 365 / 24,  # 연 18% 목표
+        risk_free_rate: float = 0.03 / 365 / 24,  # 연 3% (현실적 목표)
         max_drawdown_penalty: float = 2.0,
+        overtrade_penalty: float = 0.05,  # 과매매 페널티
     ):
         self.window_size = window_size
         self.risk_free_rate = risk_free_rate
         self.max_drawdown_penalty = max_drawdown_penalty
+        self.overtrade_penalty = overtrade_penalty
 
         self.returns_history: deque[float] = deque(maxlen=window_size)
         self.peak_value = 0.0
         self.total_trades = 0
+        self.steps_since_last_trade = 0
 
     def reset(self, initial_value: float):
         self.returns_history.clear()
         self.peak_value = initial_value
         self.total_trades = 0
+        self.steps_since_last_trade = 0
 
     def calculate(
         self,
@@ -63,13 +67,21 @@ class RewardCalculator:
         # 4. 수익 실현 보너스 — 포지션 변경 후 이익이면 보상
         action_change = abs(action - prev_action)
         profit_bonus = 0.0
+        trade_penalty = 0.0
+        self.steps_since_last_trade += 1
+
         if action_change > 0.05:
             self.total_trades += 1
             if raw_return > 0.001:  # 0.1% 이상 수익
                 profit_bonus = 0.1
 
+            # 과매매 페널티: 최근 거래 후 4스텝 이내 재거래 시 페널티
+            if self.steps_since_last_trade < 4:
+                trade_penalty = -self.overtrade_penalty
+            self.steps_since_last_trade = 0
+
         # 종합
-        total_reward = sharpe_reward + mdd_penalty + profit_bonus
+        total_reward = sharpe_reward + mdd_penalty + profit_bonus + trade_penalty
 
         return {
             "reward": float(total_reward),
@@ -79,6 +91,7 @@ class RewardCalculator:
                 "mdd_penalty": float(mdd_penalty),
                 "profit_bonus": float(profit_bonus),
                 "drawdown": float(drawdown),
+                "trade_penalty": float(trade_penalty),
                 "total_trades": self.total_trades,
             },
         }

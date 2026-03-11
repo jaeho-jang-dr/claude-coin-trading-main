@@ -1569,10 +1569,13 @@ class ShortTermTrader:
             asyncio.create_task(self.strategy_alert_monitor()),
         ]
 
-        # graceful shutdown
+        # graceful shutdown (Windows에서는 add_signal_handler 미지원)
         loop = asyncio.get_event_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, lambda: self.shutdown())
+        try:
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, lambda: self.shutdown())
+        except NotImplementedError:
+            pass  # Windows: Ctrl+C는 KeyboardInterrupt로 처리
 
         try:
             await asyncio.gather(*tasks)

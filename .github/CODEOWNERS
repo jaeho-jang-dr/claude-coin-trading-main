@@ -1,0 +1,16 @@
+# Admin만 핵심 파일 수정 가능 (PR 리뷰 강제)
+# GitHub Pro 업그레이드 시 자동 적용됨
+
+# 안전장치/설정
+.env*                          @jaeho-jang-dr
+strategy.md                    @jaeho-jang-dr
+
+# 매매 실행 (위험)
+scripts/execute_trade.py       @jaeho-jang-dr
+scripts/run_agents.py          @jaeho-jang-dr
+
+# DB 스키마
+supabase/                      @jaeho-jang-dr
+
+# RL 모델 차원 (함부로 변경 금지)
+rl_hybrid/rl/state_encoder.py  @jaeho-jang-dr

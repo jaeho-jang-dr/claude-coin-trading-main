@@ -39,15 +39,15 @@ sys.path.insert(0, str(_LIFELINE_DIR.parent))
 from lifeline.sentinel import run_all_checks
 from lifeline.health_db_sync import HealthDBSync
 
-# diagnostician / healer는 아직 없을 수 있으므로 안전하게 임포트
+# diagnostician / healer는 같은 패키지 — 안전하게 임포트
 try:
-    from lifeline.diagnostician import diagnose_all  # type: ignore[import-not-found]
+    from lifeline.diagnostician import Diagnostician  # type: ignore[import-not-found]
     _HAS_DIAGNOSTICIAN = True
 except ImportError:
     _HAS_DIAGNOSTICIAN = False
 
 try:
-    from lifeline.healer import heal_all  # type: ignore[import-not-found]
+    from lifeline.healer import Healer  # type: ignore[import-not-found]
     _HAS_HEALER = True
 except ImportError:
     _HAS_HEALER = False
@@ -156,7 +156,8 @@ def run_health_cycle(verbose: bool = False) -> dict:
                 file=sys.stderr,
             )
         try:
-            diag_results = diagnose_all(non_ok)
+            dx = Diagnostician()
+            diag_results = dx.diagnose_all(non_ok)
             for d in diag_results:
                 comp = d.get("component", "")
                 diagnoses[comp] = d
@@ -180,7 +181,8 @@ def run_health_cycle(verbose: bool = False) -> dict:
                 file=sys.stderr,
             )
         try:
-            heal_results = heal_all(healable)
+            healer = Healer()
+            heal_results = healer.heal_all(healable)
             for h in heal_results:
                 comp = h.get("component", "")
                 healings[comp] = h

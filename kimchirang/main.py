@@ -39,58 +39,115 @@ ACTION_EXIT = 2
 # ============================================================
 
 class RLBridge:
-    """기존 RL 시스템과의 브릿지
+    """PPO + DQN 앙상블 RL 브릿지
 
-    rl_hybrid 모듈이 있으면 SB3 모델을 로드하고,
-    없으면 규칙 기반 fallback으로 동작한다.
+    두 모델이 모두 있으면 앙상블 (합의 시만 행동),
+    하나만 있으면 단독 사용, 없으면 규칙 기반 fallback.
     """
 
     def __init__(self, config: KimchirangConfig):
         self.config = config
-        self._model = None
+        self._ppo_model = None
+        self._dqn_model = None
         self._available = False
 
     def load(self) -> bool:
-        """RL 모델 로드 시도"""
+        """RL 모델 로드 시도 (PPO + DQN)"""
         if not self.config.rl.enabled:
             logger.info("RL 비활성화 -- 규칙 기반 모드")
             return False
 
-        model_path = os.path.join(PROJECT_DIR, self.config.rl.model_path)
+        loaded = 0
+
+        # PPO 로드
+        ppo_path = os.path.join(PROJECT_DIR, self.config.rl.model_path)
         try:
             from stable_baselines3 import PPO
-            if os.path.exists(model_path + ".zip") or os.path.exists(model_path):
-                self._model = PPO.load(model_path)
-                self._available = True
-                logger.info(f"RL 모델 로드 완료: {model_path}")
-                return True
-            else:
-                logger.warning(f"RL 모델 파일 없음: {model_path}")
-        except ImportError:
-            logger.warning("stable-baselines3 미설치 -- 규칙 기반 모드")
+            if os.path.exists(ppo_path + ".zip") or os.path.exists(ppo_path):
+                self._ppo_model = PPO.load(ppo_path)
+                loaded += 1
+                logger.info(f"PPO 모델 로드 완료: {ppo_path}")
         except Exception as e:
-            logger.error(f"RL 모델 로드 실패: {e}")
-        return False
+            logger.warning(f"PPO 모델 로드 실패: {e}")
+
+        # DQN 로드
+        dqn_path = os.path.join(
+            PROJECT_DIR, "data", "rl_models", "kimchirang", "dqn", "best_model"
+        )
+        try:
+            from stable_baselines3 import DQN
+            if os.path.exists(dqn_path + ".zip") or os.path.exists(dqn_path):
+                self._dqn_model = DQN.load(dqn_path)
+                loaded += 1
+                logger.info(f"DQN 모델 로드 완료: {dqn_path}")
+        except Exception as e:
+            logger.warning(f"DQN 모델 로드 실패: {e}")
+
+        self._available = loaded > 0
+        if self._ppo_model and self._dqn_model:
+            logger.info("앙상블 모드: PPO + DQN (합의 시 행동)")
+        elif self._available:
+            which = "PPO" if self._ppo_model else "DQN"
+            logger.info(f"단독 모드: {which}")
+        else:
+            logger.warning("RL 모델 없음 -- 규칙 기반 모드")
+
+        return self._available
 
     def get_action(self, state: np.ndarray) -> int:
-        """RL 에이전트에게 액션 요청
+        """RL 에이전트에게 액션 요청 (앙상블)
+
+        앙상블 규칙:
+          - 둘 다 같은 액션 → 그대로 실행
+          - 한쪽만 Enter/Exit → Hold (신중하게)
+          - 단독 모델이면 그대로 실행
 
         Returns:
             0: Hold, 1: Enter, 2: Exit
         """
-        if self._available and self._model:
-            try:
-                action, _ = self._model.predict(state, deterministic=True)
-                # Discrete action space: 결과가 직접 0/1/2
-                return int(action)
-            except Exception as e:
-                logger.error(f"RL 추론 실패: {e}")
+        if not self._available:
+            return ACTION_HOLD
 
-        return ACTION_HOLD  # fallback
+        ppo_action = self._predict(self._ppo_model, state, "PPO")
+        dqn_action = self._predict(self._dqn_model, state, "DQN")
+
+        # 단독 모델
+        if ppo_action is not None and dqn_action is None:
+            return ppo_action
+        if dqn_action is not None and ppo_action is None:
+            return dqn_action
+
+        # 앙상블: 합의
+        if ppo_action == dqn_action:
+            return ppo_action
+
+        # 불일치 → Hold (신중)
+        return ACTION_HOLD
+
+    def _predict(self, model, state: np.ndarray, name: str):
+        """단일 모델 추론"""
+        if model is None:
+            return None
+        try:
+            action, _ = model.predict(state, deterministic=True)
+            return int(action)
+        except Exception as e:
+            logger.error(f"{name} 추론 실패: {e}")
+            return None
 
     @property
     def is_available(self) -> bool:
         return self._available
+
+    @property
+    def mode(self) -> str:
+        if self._ppo_model and self._dqn_model:
+            return "ensemble"
+        elif self._ppo_model:
+            return "ppo"
+        elif self._dqn_model:
+            return "dqn"
+        return "rule"
 
 
 # ============================================================

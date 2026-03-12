@@ -209,7 +209,7 @@ def analyze_multi_timeframe(market: str) -> tuple[dict, list[dict]]:
     """#3 멀티 타임프레임 다이버전스.
 
     Returns:
-        tuple: (분석 결과 dict, 일봉 원본 데이터 list) — 일봉 데이터를
+        tuple: (분석 결과 dict, 일봉 원본 데이터 list) -- 일봉 데이터를
                호출자가 재사용할 수 있도록 함께 반환한다.
     """
     daily = api_get("/candles/days", {"market": market, "count": "30"})

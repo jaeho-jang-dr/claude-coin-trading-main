@@ -14,7 +14,7 @@ class AggressiveAgent(BaseStrategyAgent):
 
     name = "aggressive"
     emoji = "🔥"
-    description = "공격적 — 빈번한 매매, 빠른 익절/손절"
+    description = "공격적 -- 빈번한 매매, 빠른 익절/손절"
 
     # 매수 조건 (공격적: 뉴스 무관 자동 20점)
     fgi_threshold = 60

@@ -58,10 +58,10 @@ def get_rl_advisory(market_data: dict, external_data: dict,
     최종 어드바이저리를 생성한다. 개별 모델은 모두 선택적(try/except).
 
     지원 모델:
-      1. SB3 (PPO/SAC/TD3) — data/rl_models/best/best_model.zip
-      2. Decision Transformer — data/rl_models/transformer/dt_model.pt
-      3. Multi-Agent Consensus — data/rl_models/multi_agent/
-      4. Offline RL (CQL/BCQ) — data/rl_models/offline/
+      1. SB3 (PPO/SAC/TD3) -- data/rl_models/best/best_model.zip
+      2. Decision Transformer -- data/rl_models/transformer/dt_model.pt
+      3. Multi-Agent Consensus -- data/rl_models/multi_agent/
+      4. Offline RL (CQL/BCQ) -- data/rl_models/offline/
     """
     advisories = {}
 
@@ -337,6 +337,7 @@ def save_execution_log(
     errors: dict | None = None,
     raw_output: str | None = None,
     decision_id: str | None = None,
+    phases_completed: list | None = None,
 ) -> bool:
     """execution_logs 테이블에 파이프라인 실행 기록을 저장한다."""
     supabase_url = os.environ.get("SUPABASE_URL", "")
@@ -345,13 +346,18 @@ def save_execution_log(
         log("execution_logs 저장 스킵: Supabase 미설정")
         return False
 
+    has_errors = bool(errors and errors.get("pipeline_errors"))
     row = {
         "execution_mode": execution_mode,
         "duration_ms": duration_ms,
         "data_sources": json.dumps(data_sources or {}, ensure_ascii=False),
         "errors": json.dumps(errors or {}, ensure_ascii=False),
         "cycle_id": _CYCLE_ID,
+        "success": not has_errors,
+        "execution_started_at": datetime.now(KST).isoformat(),
     }
+    if phases_completed:
+        row["phases_completed"] = json.dumps(phases_completed, ensure_ascii=False)
     if raw_output:
         row["raw_output"] = raw_output[:10000]  # 10KB 제한
     if decision_id:
@@ -597,8 +603,9 @@ def main():
         save_execution_log(
             execution_mode="dry_run" if os.environ.get("DRY_RUN", "true").lower() == "true" else "execute",
             duration_ms=duration_ms,
-            data_sources={"sources": data_sources_used, "phases_completed": ["phase1"]},
+            data_sources={"sources": data_sources_used},
             errors={"pipeline_errors": pipeline_errors, "fatal": str(e)},
+            phases_completed=["phase1"],
         )
         notify_error("Agent Pipeline", f"에이전트 파이프라인 실패: {e}")
         sys.exit(1)
@@ -638,7 +645,7 @@ def main():
             elif agent_decision == "hold" and rl_strength > 0.5:
                 # 에이전트 관망인데 RL이 강한 시그널 → advisory 메모만
                 output["decision"]["rl_override_hint"] = rl_dir
-                log(f"RL 강한 시그널({rl_dir}, {rl_strength:.2f}) — advisory 메모 추가")
+                log(f"RL 강한 시그널({rl_dir}, {rl_strength:.2f}) -- advisory 메모 추가")
             else:
                 # 불일치: confidence 감소 (최대 -20%)
                 dampen = min(0.20, rl_strength * 0.25)
@@ -660,7 +667,7 @@ def main():
     switch_sw = output.get("switch")
     switch_info = f"전략 전환: {switch_sw['from']} → {switch_sw['to']} ({switch_sw['reason']})" if switch_sw else "전환 없음"
     
-    log(f"Phase 3: 매매 실행 — {decision} ({agent_name})")
+    log(f"Phase 3: 매매 실행 -- {decision} ({agent_name})")
     
     trade_params = output["decision"].get("trade_params", {})
     market = trade_params.get("market", "KRW-BTC")
@@ -820,6 +827,26 @@ def main():
                             log("임베딩 생성 완료 (RAG)")
                 except Exception as emb_e:
                     log(f"임베딩 생성 실패 (비치명적): {emb_e}")
+
+                # RL prediction에 decision_id 연결
+                if emb_decision_id and rl_advisory:
+                    try:
+                        from rl_hybrid.rl.rl_db_logger import log_prediction as _log_pred_final
+                        _log_pred_final(
+                            decision_id=emb_decision_id,
+                            cycle_id=_CYCLE_ID,
+                            ensemble_action=round(rl_advisory.get("action", 0), 4),
+                            ensemble_direction=rl_advisory.get("direction"),
+                            num_models=rl_advisory.get("num_models", 0),
+                            btc_price=market_data.get("ticker", {}).get("trade_price"),
+                            rsi_14=market_data.get("indicators", {}).get("rsi_14"),
+                            fgi=market_data.get("fear_greed", {}).get("value"),
+                            danger_score=market_state.get("danger_score"),
+                            opportunity_score=market_state.get("opportunity_score"),
+                        )
+                        log("RL prediction DB 기록 (decision_id 연결)")
+                    except Exception as _rl_db_err:
+                        log(f"RL prediction DB 기록 실패 (비치명적): {_rl_db_err}")
             else:
                 log(f"decisions 기록 실패 (HTTP {resp.status_code}): {resp.text[:300]}")
                 pipeline_errors.append({"phase": "phase5", "source": "decisions", "error": resp.text[:300]})
@@ -881,13 +908,13 @@ def main():
                 duration_ms=duration_ms,
                 data_sources={
                     "sources": data_sources_used,
-                    "phases_completed": ["phase1", "phase2", "phase3", "phase4", "phase5"],
                     "agent": agent_name,
                     "decision": decision,
                     "snapshot_dir": str(snapshot_dir),
                 },
                 errors={"pipeline_errors": pipeline_errors} if pipeline_errors else None,
                 raw_output=json.dumps(output, ensure_ascii=False)[:10000],
+                phases_completed=["phase1", "phase2", "phase2.5", "phase3", "phase4", "phase5"],
             )
         except Exception as e:
             log(f"execution_logs 기록 예외: {e}")
@@ -942,7 +969,7 @@ def main():
                 market_regime=_market_regime,
             )
             if tuning_result:
-                log(f"Phase 6.7: {tuning_result.get('status', '?')} — {tuning_result.get('message', 'N/A')}")
+                log(f"Phase 6.7: {tuning_result.get('status', '?')} -- {tuning_result.get('message', 'N/A')}")
     except Exception as e:
         log(f"Phase 6.7 Self-tuning 스킵: {e}")
 

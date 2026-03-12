@@ -3,12 +3,12 @@
 매크로 경제 지표 수집 (무료 API 전용)
 
 수집 항목:
-  - S&P 500 (^GSPC) — 미국 주식시장 대표 지수
-  - 나스닥 (^IXIC) — 기술주 중심
-  - 달러 인덱스 (DX-Y.NYB) — 달러 강세/약세
-  - 금 (GC=F) — 안전자산 수요
-  - WTI 원유 (CL=F) — 지정학 리스크
-  - 미국 10년 국채 (^TNX) — 금리 방향
+  - S&P 500 (^GSPC) -- 미국 주식시장 대표 지수
+  - 나스닥 (^IXIC) -- 기술주 중심
+  - 달러 인덱스 (DX-Y.NYB) -- 달러 강세/약세
+  - 금 (GC=F) -- 안전자산 수요
+  - WTI 원유 (CL=F) -- 지정학 리스크
+  - 미국 10년 국채 (^TNX) -- 금리 방향
 
 데이터 소스: Yahoo Finance (무료, API 키 불필요)
 출력: JSON (stdout)
@@ -189,13 +189,13 @@ def analyze_macro(quotes: dict) -> dict:
     # 종합 판정
     if score >= 15:
         sentiment = "risk_on"
-        summary = "매크로 환경 강세 — 위험자산 선호"
+        summary = "매크로 환경 강세 -- 위험자산 선호"
     elif score >= 5:
         sentiment = "slightly_bullish"
         summary = "매크로 환경 소폭 우호적"
     elif score <= -15:
         sentiment = "risk_off"
-        summary = "매크로 환경 약세 — 위험자산 회피"
+        summary = "매크로 환경 약세 -- 위험자산 회피"
     elif score <= -5:
         sentiment = "slightly_bearish"
         summary = "매크로 환경 소폭 약세"

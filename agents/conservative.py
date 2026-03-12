@@ -14,7 +14,7 @@ class ConservativeAgent(BaseStrategyAgent):
 
     name = "conservative"
     emoji = "🛡️"
-    description = "보수적 — 폭락장 저점 매수, 자산 보전 우선"
+    description = "보수적 -- 폭락장 저점 매수, 자산 보전 우선"
 
     # 매수 조건
     fgi_threshold = 30

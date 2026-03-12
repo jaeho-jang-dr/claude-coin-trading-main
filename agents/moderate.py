@@ -14,7 +14,7 @@ class ModerateAgent(BaseStrategyAgent):
 
     name = "moderate"
     emoji = "⚖️"
-    description = "보통 — 조정장 매수, 균형 수익/리스크"
+    description = "보통 -- 조정장 매수, 균형 수익/리스크"
 
     # 매수 조건
     fgi_threshold = 45

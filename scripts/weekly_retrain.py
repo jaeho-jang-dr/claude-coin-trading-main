@@ -177,7 +177,7 @@ def run_retrain(force: bool = False, dry_run: bool = False):
             f"sharpe={baseline['avg_sharpe']:.3f} mdd={baseline['avg_mdd']:.2%}"
         )
     else:
-        logger.info("\n[Step 1] 기존 best 모델 없음 또는 강제 모드 — 스킵")
+        logger.info("\n[Step 1] 기존 best 모델 없음 또는 강제 모드 -- 스킵")
 
     # 2. 새 모델 훈련
     logger.info("\n[Step 2] 새 모델 훈련...")
@@ -212,14 +212,14 @@ def run_retrain(force: bool = False, dry_run: bool = False):
 
     # 5. 모델 교체 또는 롤백
     if dry_run:
-        logger.info("\n[Step 5] DRY-RUN 모드 — 모델 교체 안 함")
+        logger.info("\n[Step 5] DRY-RUN 모드 -- 모델 교체 안 함")
     elif should_replace:
         backup_current_best()
         os.makedirs(os.path.dirname(BEST_MODEL), exist_ok=True)
         shutil.copy2(LATEST_MODEL, BEST_MODEL)
         logger.info(f"\n[Step 5] 모델 교체 완료 → {BEST_MODEL}")
     else:
-        logger.info("\n[Step 5] 성능 저하 — 기존 best 유지 (롤백)")
+        logger.info("\n[Step 5] 성능 저하 -- 기존 best 유지 (롤백)")
 
     # 6. 이력 기록
     elapsed = time.time() - start

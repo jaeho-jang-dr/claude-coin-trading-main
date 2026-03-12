@@ -161,7 +161,7 @@ def stochastic(
 
 
 def calc_adx(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> dict:
-    """ADX (Average Directional Index) — 추세 강도 측정.
+    """ADX (Average Directional Index) -- 추세 강도 측정.
 
     Returns: {"adx": float, "plus_di": float, "minus_di": float, "regime": str}
     regime: "trending" (ADX >= 25), "ranging" (ADX < 20), "transitioning" (20-25)
@@ -220,7 +220,7 @@ def calc_adx(highs: list[float], lows: list[float], closes: list[float], period:
 
 
 def calc_atr(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> float:
-    """ATR (Average True Range) — 변동성 측정."""
+    """ATR (Average True Range) -- 변동성 측정."""
     if len(closes) < period + 1:
         return 0.0
     tr_list = []

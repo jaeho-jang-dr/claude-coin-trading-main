@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-바이낸스 파생상품 심리 지표 + 김치 프리미엄 (무료 API — 키 불필요)
+바이낸스 파생상품 심리 지표 + 김치 프리미엄 (무료 API -- 키 불필요)
 
 수집 항목:
   1. 롱/숏 비율 (Top Trader Long/Short Position Ratio)
@@ -284,13 +284,13 @@ def fetch_kimchi_premium() -> dict:
 
     # 김치 프리미엄 시그널
     if premium_pct > 5.0:
-        signal = "extreme_fomo"  # 국내 과열 — 조정 경고
+        signal = "extreme_fomo"  # 국내 과열 -- 조정 경고
     elif premium_pct > 3.0:
         signal = "high_premium"
     elif premium_pct > 1.0:
         signal = "moderate_premium"
     elif premium_pct < -1.0:
-        signal = "discount"  # 국내 할인 — 매수 기회 가능
+        signal = "discount"  # 국내 할인 -- 매수 기회 가능
     elif premium_pct < -3.0:
         signal = "deep_discount"
     else:
@@ -330,7 +330,7 @@ def compute_sentiment_score(
         if lr > 1.5:
             pts = 10
             components.append({"name": "long_short_ratio", "score": pts,
-                               "detail": f"롱 과밀 ({lr:.2f}) — 조정 경고"})
+                               "detail": f"롱 과밀 ({lr:.2f}) -- 조정 경고"})
         elif lr > 1.2:
             pts = 5
             components.append({"name": "long_short_ratio", "score": pts,
@@ -338,7 +338,7 @@ def compute_sentiment_score(
         elif lr < 0.7:
             pts = -10
             components.append({"name": "long_short_ratio", "score": pts,
-                               "detail": f"숏 과밀 ({lr:.2f}) — 반등 가능"})
+                               "detail": f"숏 과밀 ({lr:.2f}) -- 반등 가능"})
         elif lr < 0.85:
             pts = -5
             components.append({"name": "long_short_ratio", "score": pts,
@@ -353,7 +353,7 @@ def compute_sentiment_score(
         if rate > 0.001:
             pts = 10
             components.append({"name": "funding_rate", "score": pts,
-                               "detail": f"극단적 양수 펀딩 ({rate*100:.3f}%) — 롱 과열"})
+                               "detail": f"극단적 양수 펀딩 ({rate*100:.3f}%) -- 롱 과열"})
         elif rate > 0.0005:
             pts = 5
             components.append({"name": "funding_rate", "score": pts,
@@ -361,7 +361,7 @@ def compute_sentiment_score(
         elif rate < -0.001:
             pts = -10
             components.append({"name": "funding_rate", "score": pts,
-                               "detail": f"극단적 음수 펀딩 ({rate*100:.3f}%) — 숏 과열"})
+                               "detail": f"극단적 음수 펀딩 ({rate*100:.3f}%) -- 숏 과열"})
         elif rate < -0.0005:
             pts = -5
             components.append({"name": "funding_rate", "score": pts,
@@ -376,7 +376,7 @@ def compute_sentiment_score(
         if p > 5.0:
             pts = 10
             components.append({"name": "kimchi_premium", "score": pts,
-                               "detail": f"극단 프리미엄 ({p:.1f}%) — 국내 FOMO"})
+                               "detail": f"극단 프리미엄 ({p:.1f}%) -- 국내 FOMO"})
         elif p > 3.0:
             pts = 5
             components.append({"name": "kimchi_premium", "score": pts,
@@ -384,7 +384,7 @@ def compute_sentiment_score(
         elif p < -3.0:
             pts = -10
             components.append({"name": "kimchi_premium", "score": pts,
-                               "detail": f"깊은 디스카운트 ({p:.1f}%) — 매수 기회"})
+                               "detail": f"깊은 디스카운트 ({p:.1f}%) -- 매수 기회"})
         elif p < -1.0:
             pts = -5
             components.append({"name": "kimchi_premium", "score": pts,

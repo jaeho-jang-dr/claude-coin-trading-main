@@ -66,7 +66,7 @@ def acquire_lock(timeout=15):
                     print(f"[lock] stale lock 제거 (age={age:.0f}s, pid={lock_pid}, alive={pid_alive})", file=sys.stderr)
                     LOCK_FILE.unlink(missing_ok=True)
                 else:
-                    # Lock is valid and held by a live process — wait or timeout
+                    # Lock is valid and held by a live process -- wait or timeout
                     if time.time() - start_time > timeout:
                         raise TimeoutError(f"락을 획득하지 못했습니다. 다른 매매 프로세스 실행 중 (pid={lock_pid}, age={age:.0f}s)")
                     time.sleep(0.5)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-블록체인 고래 추적 (무료 API 전용 — API 키 불필요)
+블록체인 고래 추적 (무료 API 전용 -- API 키 불필요)
 
 데이터 소스: mempool.space (완전 무료, 키 불필요)
 
@@ -333,7 +333,7 @@ def compute_whale_score(block_analysis: dict, mempool_analysis: dict) -> dict:
     # 1) 활동량 기반 (절대값)
     if mega_count >= 3:
         activity_pts = 10
-        reasons.append(f"메가 고래(100+ BTC) {mega_count}건 — 대규모 자금 이동")
+        reasons.append(f"메가 고래(100+ BTC) {mega_count}건 -- 대규모 자금 이동")
     elif mega_count >= 1:
         activity_pts = 5
         reasons.append(f"메가 고래(100+ BTC) {mega_count}건")
@@ -342,7 +342,7 @@ def compute_whale_score(block_analysis: dict, mempool_analysis: dict) -> dict:
         reasons.append(f"고래 거래 {whale_count}건 활발")
     elif whale_count == 0:
         activity_pts = -3
-        reasons.append("고래 활동 미감지 — 안정적 구간")
+        reasons.append("고래 활동 미감지 -- 안정적 구간")
     else:
         activity_pts = 0
 
@@ -369,7 +369,7 @@ def compute_whale_score(block_analysis: dict, mempool_analysis: dict) -> dict:
     # 3) 멤풀 대기
     if pending_count >= 3:
         pending_pts = 2
-        reasons.append(f"멤풀 대형 대기 {pending_count}건 — 추가 변동 예고")
+        reasons.append(f"멤풀 대형 대기 {pending_count}건 -- 추가 변동 예고")
     else:
         pending_pts = 0
 

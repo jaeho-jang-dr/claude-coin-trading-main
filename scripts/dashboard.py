@@ -395,7 +395,7 @@ def api_toggle(key):
 
 @app.route("/rc")
 def rc_redirect():
-    """최신 RC URL로 리다이렉트 — 아이폰 홈화면 바로가기용"""
+    """최신 RC URL로 리다이렉트 -- 아이폰 홈화면 바로가기용"""
     url_file = PROJECT_ROOT / "data" / "remote_url.txt"
     try:
         if url_file.exists():

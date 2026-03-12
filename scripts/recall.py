@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-거래 기록 리콜 스크립트 — 최소 토큰으로 과거 결정 조회
+거래 기록 리콜 스크립트 -- 최소 토큰으로 과거 결정 조회
 
 사용법:
   python3 scripts/recall.py today              # 오늘 거래 요약
@@ -44,7 +44,7 @@ def headers():
 
 
 def query_raw(table_or_view: str, params: dict = None) -> list:
-    """Supabase REST API query — 파라미터 그대로 전달"""
+    """Supabase REST API query -- 파라미터 그대로 전달"""
     url = f"{SUPABASE_URL}/rest/v1/{table_or_view}"
     r = requests.get(url, headers=headers(), params=params or {}, timeout=15)
     if r.ok:

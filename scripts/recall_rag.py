@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-RAG 기반 과거 거래 리콜 — 현재 시장과 가장 유사한 과거 경험 조회
+RAG 기반 과거 거래 리콜 -- 현재 시장과 가장 유사한 과거 경험 조회
 
 사용법:
   python3 scripts/recall_rag.py                    # 현재 시장 데이터 자동 수집
@@ -228,7 +228,7 @@ def main():
     results = query_similar_decisions(embedding, args.top)
 
     if not results:
-        msg = "과거 임베딩 데이터 없음 — 거래 이력이 쌓이면 유사 경험을 조회할 수 있습니다."
+        msg = "과거 임베딩 데이터 없음 -- 거래 이력이 쌓이면 유사 경험을 조회할 수 있습니다."
         if args.json:
             print(json.dumps({"status": "no_data", "message": msg, "query_text": text}, ensure_ascii=False))
         else:

@@ -49,7 +49,7 @@ echo "  실행 시간: ${RUN_HOURS}시간" | tee -a "$LOG_FILE"
 
 # 텔레그램 알림 (선택)
 if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_USER_ID:-}" ]; then
-  MSG="단타 봇 예약: ${START_TIME} 시작 예정 (${RUN_HOURS}시간 DRY_RUN)"
+  MSG="단타 봇 예약: ${START_TIME} 시작 예정 (${RUN_HOURS}시간, DRY_RUN=${DRY_RUN:-true})"
   curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
     -d "chat_id=${TELEGRAM_USER_ID}" \
     -d "text=${MSG}" > /dev/null 2>&1 || true
@@ -62,14 +62,14 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] 단타 봇 시작 (${RUN_HOURS}시간)" | t
 
 # 텔레그램 알림
 if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_USER_ID:-}" ]; then
-  MSG="단타 봇 시작 (DRY_RUN, ${RUN_HOURS}시간)"
+  MSG="단타 봇 시작 (DRY_RUN=${DRY_RUN:-true}, ${RUN_HOURS}시간)"
   curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
     -d "chat_id=${TELEGRAM_USER_ID}" \
     -d "text=${MSG}" > /dev/null 2>&1 || true
 fi
 
-# 단타 봇 실행 (DRY_RUN 강제, 백그라운드)
-python3 scripts/short_term_trader.py --dry-run >> "$LOG_FILE" 2>&1 &
+# 단타 봇 실행 (.env DRY_RUN 설정 따름)
+python3 scripts/short_term_trader.py >> "$LOG_FILE" 2>&1 &
 BOT_PID=$!
 
 echo "  PID: ${BOT_PID}" | tee -a "$LOG_FILE"

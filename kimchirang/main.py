@@ -81,13 +81,8 @@ class RLBridge:
         if self._available and self._model:
             try:
                 action, _ = self._model.predict(state, deterministic=True)
-                # SB3 continuous action을 discrete로 변환
-                action_val = float(action) if np.isscalar(action) else float(action[0])
-                if action_val > 0.3:
-                    return ACTION_ENTER
-                elif action_val < -0.3:
-                    return ACTION_EXIT
-                return ACTION_HOLD
+                # Discrete action space: 결과가 직접 0/1/2
+                return int(action)
             except Exception as e:
                 logger.error(f"RL 추론 실패: {e}")
 
@@ -193,7 +188,11 @@ class KimchirangBot:
                 f"| pos={pos['side']}"
             )
 
-        # 2b. 주기적 텔레그램 상태 보고 (5분마다)
+        # 2b. KP 히스토리 DB 기록 (1분마다)
+        if self._tick_count % 60 == 0:
+            await self.db.record_kp_snapshot(snapshot, stats)
+
+        # 2c. 주기적 텔레그램 상태 보고 (5분마다)
         if self._tick_count % 300 == 0:
             await self.notifier.notify_status(stats, pos)
 

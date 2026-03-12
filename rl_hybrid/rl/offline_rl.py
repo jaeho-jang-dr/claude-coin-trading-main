@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -37,7 +38,7 @@ try:
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
-    logger.warning("PyTorch 미설치 — Offline RL 비활성화")
+    logger.warning("PyTorch 미설치 -- Offline RL 비활성화")
 
 from rl_hybrid.rl.state_encoder import StateEncoder, OBSERVATION_DIM
 
@@ -114,7 +115,7 @@ class OfflineDatasetBuilder:
         from rl_hybrid.config import config
 
         if not config.supabase.url or not config.supabase.service_role_key:
-            logger.error("Supabase 설정 없음 — .env에 SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY 설정 필요")
+            logger.error("Supabase 설정 없음 -- .env에 SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY 설정 필요")
             return 0
 
         decisions = self._fetch_decisions(
@@ -1427,6 +1428,21 @@ def train_offline(
     output_dir = output_dir or OFFLINE_MODEL_DIR
     os.makedirs(output_dir, exist_ok=True)
 
+    # DB 로깅: 훈련 시작
+    _offline_cycle_id = None
+    _offline_start_time = time.time()
+    try:
+        from rl_hybrid.rl.rl_db_logger import log_training_start
+        _offline_cycle_id = log_training_start(
+            cycle_type="offline",
+            algorithm=algorithm,
+            module="offline_rl",
+            training_epochs=epochs,
+            data_count=min_data_points,
+        )
+    except Exception:
+        pass
+
     # 1. 데이터 로드
     logger.info("=== Offline RL 훈련 시작 ===")
     builder = OfflineDatasetBuilder()
@@ -1439,6 +1455,13 @@ def train_offline(
     if n_transitions < min_data_points:
         msg = f"데이터 부족: {n_transitions}건 (최소 {min_data_points}건 필요)"
         logger.error(msg)
+        if _offline_cycle_id:
+            try:
+                from rl_hybrid.rl.rl_db_logger import log_training_complete
+                log_training_complete(cycle_id=_offline_cycle_id, status="skipped",
+                                     error_message=msg, elapsed_seconds=time.time() - _offline_start_time)
+            except Exception:
+                pass
         return {"error": msg, "transitions": n_transitions}
 
     # 데이터셋 저장 (재사용)
@@ -1555,6 +1578,23 @@ def train_offline(
     if comparison.get("reason"):
         print(f"  사유: {comparison['reason']}")
     print("=" * 60 + "\n")
+
+    # DB 로깅: 훈련 완료
+    if _offline_cycle_id:
+        try:
+            from rl_hybrid.rl.rl_db_logger import log_training_complete
+            log_training_complete(
+                cycle_id=_offline_cycle_id,
+                direction_accuracy=eval_metrics.get("direction_accuracy"),
+                q_loss=train_metrics.get("final_q_loss"),
+                cql_penalty=train_metrics.get("final_cql_penalty"),
+                model_version=version_id,
+                model_path=model_path,
+                elapsed_seconds=time.time() - _offline_start_time,
+                status="completed",
+            )
+        except Exception:
+            pass
 
     return report
 

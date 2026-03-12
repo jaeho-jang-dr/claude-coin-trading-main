@@ -326,13 +326,13 @@ class HistoricalDataLoader:
         """
         db_url = os.environ.get("SUPABASE_DB_URL")
         if not db_url:
-            logger.warning("SUPABASE_DB_URL 미설정 — 외부 시그널 로드 불가")
+            logger.warning("SUPABASE_DB_URL 미설정 -- 외부 시그널 로드 불가")
             return []
 
         try:
             import psycopg2
         except ImportError:
-            logger.warning("psycopg2 미설치 — 외부 시그널 로드 불가")
+            logger.warning("psycopg2 미설치 -- 외부 시그널 로드 불가")
             return []
 
         since = datetime.utcnow() - timedelta(days=days)

@@ -41,7 +41,7 @@ try:
     SB3_AVAILABLE = True
 except ImportError:
     SB3_AVAILABLE = False
-    logger.warning("stable-baselines3 미설치 — Multi-Agent RL 비활성화")
+    logger.warning("stable-baselines3 미설치 -- Multi-Agent RL 비활성화")
 
 # 모델 저장 경로
 MODEL_DIR = os.path.join(
@@ -1585,25 +1585,68 @@ class MultiAgentTrainer:
         logger.info("  Multi-Agent Consensus RL 훈련 시작")
         logger.info("=" * 60)
 
-        # Phase 1: 독립 훈련
-        self._train_phase1(scalping_days, swing_days)
+        # DB 로깅: 훈련 시작
+        _ma_cycle_id = None
+        _ma_start_time = time.time()
+        try:
+            from rl_hybrid.rl.rl_db_logger import log_training_start
+            _ma_cycle_id = log_training_start(
+                cycle_type="standalone",
+                algorithm="multi_agent",
+                module="multi_agent_consensus",
+                training_steps=self.scalping_steps + self.swing_steps,
+                data_days=swing_days,
+            )
+        except Exception:
+            pass
 
-        # Phase 2: 가중치 학습
-        self._train_phase2(swing_days)
+        try:
+            # Phase 1: 독립 훈련
+            self._train_phase1(scalping_days, swing_days)
 
-        # Phase 3: Joint fine-tuning (선택)
-        if joint_finetune:
-            self._train_phase3(swing_days)
+            # Phase 2: 가중치 학습
+            self._train_phase2(swing_days)
 
-        # 평가
-        self._evaluate_all(swing_days)
+            # Phase 3: Joint fine-tuning (선택)
+            if joint_finetune:
+                self._train_phase3(swing_days)
 
-        # 저장
-        self._save_all()
+            # 평가
+            self._evaluate_all(swing_days)
 
-        logger.info("=" * 60)
-        logger.info("  Multi-Agent Consensus RL 훈련 완료")
-        logger.info("=" * 60)
+            # 저장
+            self._save_all()
+
+            logger.info("=" * 60)
+            logger.info("  Multi-Agent Consensus RL 훈련 완료")
+            logger.info("=" * 60)
+
+            # DB 로깅: 훈련 완료
+            if _ma_cycle_id:
+                try:
+                    from rl_hybrid.rl.rl_db_logger import log_training_complete
+                    log_training_complete(
+                        cycle_id=_ma_cycle_id,
+                        elapsed_seconds=time.time() - _ma_start_time,
+                        status="completed",
+                    )
+                except Exception:
+                    pass
+
+        except Exception as e:
+            logger.error(f"Multi-Agent 훈련 실패: {e}", exc_info=True)
+            if _ma_cycle_id:
+                try:
+                    from rl_hybrid.rl.rl_db_logger import log_training_complete
+                    log_training_complete(
+                        cycle_id=_ma_cycle_id,
+                        elapsed_seconds=time.time() - _ma_start_time,
+                        status="failed",
+                        error_message=str(e)[:500],
+                    )
+                except Exception:
+                    pass
+            raise
 
     def _train_phase1(self, scalping_days: int, swing_days: int):
         """Phase 1: 개별 에이전트 훈련"""
@@ -2226,7 +2269,7 @@ def main():
     elif args.eval:
         predictor = MultiAgentPredictor()
         if predictor.load():
-            logger.info("Multi-Agent 모델 로드 성공 — 추론 테스트")
+            logger.info("Multi-Agent 모델 로드 성공 -- 추론 테스트")
             # 더미 데이터로 추론 테스트
             result = predictor.predict(
                 market_data={"current_price": 100_000_000, "change_rate_24h": 0.01,
@@ -2240,7 +2283,7 @@ def main():
             )
             logger.info(f"추론 결과: {json.dumps(result, indent=2, default=str)}")
         else:
-            logger.error("모델 로드 실패 — 먼저 --train을 실행하세요")
+            logger.error("모델 로드 실패 -- 먼저 --train을 실행하세요")
     else:
         parser.print_help()
 

@@ -95,6 +95,31 @@ class ModelRegistry:
             f"sharpe={metrics.get('sharpe_ratio', 'N/A')}, "
             f"return={metrics.get('total_return_pct', 'N/A')}%"
         )
+
+        # DB 동기화: 기존 활성 모델 비활성화 후 새 버전 등록
+        try:
+            from rl_hybrid.rl.rl_db_logger import (
+                deactivate_all_models as _deactivate_all,
+                log_model_version as _log_version,
+            )
+            _deactivate_all()
+            _log_version(
+                version_id=version_id,
+                algorithm=(training_config or {}).get("algorithm", "unknown"),
+                model_path=model_file,
+                sharpe_ratio=metrics.get("sharpe_ratio"),
+                total_return_pct=metrics.get("total_return_pct"),
+                max_drawdown=metrics.get("max_drawdown"),
+                eval_episodes=metrics.get("eval_episodes"),
+                training_steps=(training_config or {}).get("total_timesteps"),
+                training_days=(training_config or {}).get("data_days"),
+                training_config=training_config,
+                is_active=True,
+                notes=notes or None,
+            )
+        except Exception as e:
+            logger.warning(f"모델 등록 DB 동기화 실패 (비치명적): {e}")
+
         return version_id
 
     def get_current_version(self) -> Optional[dict]:
@@ -134,6 +159,19 @@ class ModelRegistry:
                 "updated_at": datetime.now().isoformat(),
             }
             self._save_registry()
+
+            # DB 동기화: 라이브 성능 메트릭 업데이트
+            try:
+                from rl_hybrid.rl.rl_db_logger import update_model_version as _update_ver
+                _update_ver(
+                    version_id,
+                    live_trades=metrics.get("trades"),
+                    live_win_rate=metrics.get("win_rate"),
+                    live_avg_return=metrics.get("avg_return"),
+                    live_sharpe=metrics.get("sharpe"),
+                )
+            except Exception as e:
+                logger.warning(f"라이브 성능 DB 업데이트 실패 (비치명적): {e}")
 
     def should_rollback(self, version_id: str = None) -> tuple[bool, str]:
         """롤백 필요 여부 판단
@@ -200,6 +238,15 @@ class ModelRegistry:
                 f"모델 롤백: {old_version} → {best_version['version_id']} "
                 f"(sharpe={best_sharpe:.3f})"
             )
+
+            # DB 동기화: 이전 버전 비활성화, 롤백 대상 활성화
+            try:
+                from rl_hybrid.rl.rl_db_logger import update_model_version as _update_ver
+                _update_ver(old_version, is_active=False)
+                _update_ver(best_version["version_id"], is_active=True)
+            except Exception as e:
+                logger.warning(f"롤백 DB 동기화 실패 (비치명적): {e}")
+
             return best_version["version_id"]
 
         return None

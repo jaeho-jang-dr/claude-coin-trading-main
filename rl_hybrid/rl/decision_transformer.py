@@ -32,7 +32,7 @@ try:
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
-    logger.warning("PyTorch 미설치 — Decision Transformer 비활성화")
+    logger.warning("PyTorch 미설치 -- Decision Transformer 비활성화")
 
 # 모델 저장 경로
 MODEL_DIR = os.path.join(
@@ -1047,6 +1047,22 @@ def train_dt(
     save_dir = save_dir or MODEL_DIR
     os.makedirs(save_dir, exist_ok=True)
 
+    # DB 로깅: 훈련 시작
+    _dt_cycle_id = None
+    _dt_start_time = time.time()
+    try:
+        from rl_hybrid.rl.rl_db_logger import log_training_start
+        _dt_cycle_id = log_training_start(
+            cycle_type="standalone",
+            algorithm="dt",
+            module="decision_transformer",
+            training_epochs=n_epochs,
+            data_days=days,
+            interval=interval,
+        )
+    except Exception:
+        pass
+
     logger.info(f"=== Decision Transformer 훈련 시작 ===")
     logger.info(f"데이터: {days}일 {interval} 캔들")
     logger.info(f"모델: embed={embed_dim}, layers={n_layers}, heads={n_heads}, context={context_length}")
@@ -1158,6 +1174,23 @@ def train_dt(
         logger.info(f"ModelRegistry 등록: {version_id}")
     except Exception as e:
         logger.warning(f"ModelRegistry 등록 실패: {e}")
+
+    # DB 로깅: 훈련 완료
+    if _dt_cycle_id:
+        try:
+            from rl_hybrid.rl.rl_db_logger import log_training_complete
+            log_training_complete(
+                cycle_id=_dt_cycle_id,
+                best_eval_loss=results.get("best_eval_loss"),
+                n_sequences=len(dataset),
+                context_length=context_length,
+                model_version=results.get("registry_version"),
+                model_path=model_path,
+                elapsed_seconds=time.time() - _dt_start_time,
+                status="completed",
+            )
+        except Exception:
+            pass
 
     logger.info(f"=== 훈련 완료: best_eval_loss={results['best_eval_loss']:.6f} ===")
     return results

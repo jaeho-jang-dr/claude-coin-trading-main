@@ -27,7 +27,7 @@ try:
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
-    logger.warning("PyTorch 미설치 — LLM state encoder 비활성화")
+    logger.warning("PyTorch 미설치 -- LLM state encoder 비활성화")
 
 from rl_hybrid.rl.state_encoder import StateEncoder, OBSERVATION_DIM
 
@@ -309,7 +309,7 @@ class LLMStateEncoder:
             self._load_projection(projection_path)
             logger.info(f"투사 가중치 로드: {projection_path}")
         else:
-            logger.warning("투사 가중치 없음 — 랜덤 초기화 사용")
+            logger.warning("투사 가중치 없음 -- 랜덤 초기화 사용")
         self.projection.eval()
 
         # Gemini 클라이언트 (lazy init)
@@ -485,7 +485,7 @@ def train_projection(
     # 1. Supabase에서 과거 임베딩 로드
     embeddings = _load_historical_embeddings()
     if len(embeddings) < 10:
-        logger.warning(f"과거 임베딩 부족 ({len(embeddings)}건) — 최소 10건 필요")
+        logger.warning(f"과거 임베딩 부족 ({len(embeddings)}건) -- 최소 10건 필요")
         return {"final_loss": -1, "num_samples": len(embeddings)}
 
     logger.info(f"과거 임베딩 로드 완료: {len(embeddings)}건")

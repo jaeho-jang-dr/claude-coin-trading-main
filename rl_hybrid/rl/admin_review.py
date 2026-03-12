@@ -157,7 +157,7 @@ def promote_model(submission_id: int):
     algo = target.get("algorithm", "ppo")
     ret = target.get("avg_return_pct", 0)
 
-    logger.info(f"승격 대상: #{submission_id} {trainer_id} ({algo}) — {ret:.2f}%")
+    logger.info(f"승격 대상: #{submission_id} {trainer_id} ({algo}) -- {ret:.2f}%")
 
     # 모델 파일 찾기
     submissions_dir = os.path.join(MODEL_DIR, "submissions")

@@ -463,11 +463,11 @@ class ParetoFrontier:
         2D scatter plot으로 주요 목표 쌍의 트레이드오프를 보여준다.
         """
         if not PLT_AVAILABLE:
-            logger.warning("matplotlib 미설치 — Pareto 시각화 생략")
+            logger.warning("matplotlib 미설치 -- Pareto 시각화 생략")
             return
 
         if len(self.solutions) < 2:
-            logger.info("Pareto 해가 2개 미만 — 시각화 생략")
+            logger.info("Pareto 해가 2개 미만 -- 시각화 생략")
             return
 
         fig, axes = plt.subplots(1, 3, figsize=(18, 5))

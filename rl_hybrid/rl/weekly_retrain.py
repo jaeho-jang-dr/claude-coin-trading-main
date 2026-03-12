@@ -57,13 +57,15 @@ def load_current_best_info() -> dict:
     return {"algorithm": "ppo", "avg_return_pct": 0, "avg_sharpe": 0}
 
 
-def evaluate_model(trader, eval_candles, eval_signals, balance, episodes=10) -> dict:
+def evaluate_model(trader, eval_candles, eval_signals, balance, episodes=10, sys_config=None) -> dict:
     """모델 평가 후 통계 반환"""
     eval_env = BitcoinTradingEnv(
         candles=eval_candles,
         initial_balance=balance,
         external_signals=eval_signals,
     )
+    if sys_config is not None:
+        eval_env = _maybe_wrap_morl(eval_env, sys_config)
     stats = evaluate(trader, eval_env, episodes=episodes)
     return {
         "avg_return": float(np.mean([s["total_return_pct"] for s in stats])),
@@ -115,9 +117,18 @@ def _train_extra_stages(days: int, sys_config: SystemConfig) -> dict:
 
     # Stage 2: Offline RL (CQL) — 축적된 DB 데이터로 오프라인 학습
     logger.info("\n--- Stage 2: Offline RL (CQL) ---")
+    offline_cycle_id = None
     try:
         from rl_hybrid.rl.offline_rl import train_offline
         t0 = time.time()
+        try:
+            from rl_hybrid.rl.rl_db_logger import log_training_start, log_training_complete
+            offline_cycle_id = log_training_start(
+                cycle_type="weekly", algorithm="cql", module="offline_rl",
+                training_epochs=50, data_days=days,
+            )
+        except Exception:
+            pass
         offline_result = train_offline(
             algorithm="cql",
             epochs=50,
@@ -127,29 +138,86 @@ def _train_extra_stages(days: int, sys_config: SystemConfig) -> dict:
         elapsed = time.time() - t0
         results["offline_rl"] = {"status": "ok", "elapsed": f"{elapsed:.0f}s", **offline_result}
         logger.info(f"Offline RL 완료: {offline_result} ({elapsed:.0f}s)")
+        if offline_cycle_id:
+            try:
+                eval_m = offline_result.get("eval_metrics", {})
+                log_training_complete(
+                    cycle_id=offline_cycle_id,
+                    direction_accuracy=eval_m.get("direction_accuracy"),
+                    q_loss=offline_result.get("train_metrics", {}).get("final_q_loss"),
+                    cql_penalty=offline_result.get("train_metrics", {}).get("final_cql_penalty"),
+                    model_path=offline_result.get("model_path"),
+                    model_version=offline_result.get("version_id"),
+                    elapsed_seconds=elapsed, status="completed",
+                )
+            except Exception:
+                pass
     except Exception as e:
         results["offline_rl"] = {"status": "skipped", "reason": str(e)}
         logger.warning(f"Offline RL 훈련 건너뜀: {e}")
+        if offline_cycle_id:
+            try:
+                log_training_complete(cycle_id=offline_cycle_id, status="failed",
+                                     error_message=str(e)[:500], elapsed_seconds=time.time() - t0)
+            except Exception:
+                pass
 
     # Stage 3: Decision Transformer
     logger.info("\n--- Stage 3: Decision Transformer ---")
+    dt_cycle_id = None
     try:
         from rl_hybrid.rl.decision_transformer import train_dt
         t0 = time.time()
+        try:
+            from rl_hybrid.rl.rl_db_logger import log_training_start, log_training_complete
+            dt_cycle_id = log_training_start(
+                cycle_type="weekly", algorithm="dt", module="decision_transformer",
+                training_epochs=50, data_days=days, interval="4h",
+            )
+        except Exception:
+            pass
         dt_result = train_dt(days=days, interval="4h", n_epochs=50)
         elapsed = time.time() - t0
         results["decision_transformer"] = {"status": "ok", "elapsed": f"{elapsed:.0f}s", **dt_result}
         logger.info(f"Decision Transformer 완료: {dt_result} ({elapsed:.0f}s)")
+        if dt_cycle_id:
+            try:
+                log_training_complete(
+                    cycle_id=dt_cycle_id,
+                    best_eval_loss=dt_result.get("best_eval_loss"),
+                    n_sequences=dt_result.get("n_sequences"),
+                    model_version=dt_result.get("registry_version"),
+                    elapsed_seconds=elapsed, status="completed",
+                )
+            except Exception:
+                pass
     except Exception as e:
         results["decision_transformer"] = {"status": "skipped", "reason": str(e)}
         logger.warning(f"DT 훈련 건너뜀: {e}")
+        if dt_cycle_id:
+            try:
+                log_training_complete(cycle_id=dt_cycle_id, status="failed",
+                                     error_message=str(e)[:500], elapsed_seconds=time.time() - t0)
+            except Exception:
+                pass
 
     # Stage 4: Multi-Agent Consensus (설정에서 enabled인 경우)
     if sys_config.multi_agent.enabled:
         logger.info("\n--- Stage 4: Multi-Agent Consensus ---")
+        ma_cycle_id = None
         try:
             from rl_hybrid.rl.multi_agent_consensus import MultiAgentTrainer
             t0 = time.time()
+            try:
+                from rl_hybrid.rl.rl_db_logger import log_training_start, log_training_complete
+                ma_cycle_id = log_training_start(
+                    cycle_type="weekly", algorithm="multi_agent",
+                    module="multi_agent_consensus",
+                    training_steps=sys_config.multi_agent.scalping_steps + sys_config.multi_agent.swing_steps,
+                    data_days=days,
+                )
+            except Exception:
+                pass
             trainer = MultiAgentTrainer(
                 scalping_steps=sys_config.multi_agent.scalping_steps,
                 swing_steps=sys_config.multi_agent.swing_steps,
@@ -159,9 +227,22 @@ def _train_extra_stages(days: int, sys_config: SystemConfig) -> dict:
             elapsed = time.time() - t0
             results["multi_agent"] = {"status": "ok", "elapsed": f"{elapsed:.0f}s"}
             logger.info(f"Multi-Agent Consensus 훈련 완료 ({elapsed:.0f}s)")
+            if ma_cycle_id:
+                try:
+                    log_training_complete(
+                        cycle_id=ma_cycle_id, elapsed_seconds=elapsed, status="completed",
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             results["multi_agent"] = {"status": "skipped", "reason": str(e)}
             logger.warning(f"Multi-Agent 훈련 건너뜀: {e}")
+            if ma_cycle_id:
+                try:
+                    log_training_complete(cycle_id=ma_cycle_id, status="failed",
+                                         error_message=str(e)[:500], elapsed_seconds=time.time() - t0)
+                except Exception:
+                    pass
     else:
         results["multi_agent"] = {"status": "disabled"}
         logger.info("Multi-Agent Consensus: 비활성화 (MULTI_AGENT_ENABLED=false)")
@@ -242,7 +323,7 @@ def weekly_retrain(days: int = 90, total_steps: int = 200_000, balance: float = 
     logger.info(f"=== 주간 재학습 시작 ({timestamp}) ===")
     use_morl = sys_config.multi_objective_rl.envelope_morl
     if use_morl:
-        logger.info("MORL Envelope 모드 활성화 — 환경에 MultiObjectiveEnv 래퍼 적용")
+        logger.info("MORL Envelope 모드 활성화 -- 환경에 MultiObjectiveEnv 래퍼 적용")
 
     # 데이터 준비
     train_candles, eval_candles, train_signals, eval_signals = prepare_data(days)
@@ -284,7 +365,7 @@ def weekly_retrain(days: int = 90, total_steps: int = 200_000, balance: float = 
                 save_freq=total_steps // 5,
             )
 
-            stats = evaluate_model(trader_ft, eval_candles, eval_signals, balance)
+            stats = evaluate_model(trader_ft, eval_candles, eval_signals, balance, sys_config=sys_config)
             candidates[f"{current_algo}_finetune"] = {"trader": trader_ft, **stats}
             logger.info(f"  fine-tune 결과: 수익률={stats['avg_return']:.2f}%, 샤프={stats['avg_sharpe']:.3f}")
         except Exception as e:
@@ -295,14 +376,31 @@ def weekly_retrain(days: int = 90, total_steps: int = 200_000, balance: float = 
     day_of_month = datetime.now(KST).day
     if day_of_month <= 7:
         algos_to_train = ["ppo", "sac", "td3"]
-        logger.info("월초 — PPO + SAC + TD3 전체 비교")
+        logger.info("월초 -- PPO + SAC + TD3 전체 비교")
     else:
         algos_to_train = ["ppo"]
-        logger.info("주간 — PPO만 훈련 (SAC/TD3는 월초에만)")
+        logger.info("주간 -- PPO만 훈련 (SAC/TD3는 월초에만)")
 
     for algo in algos_to_train:
+        algo_cycle_id = None
+        algo_start = time.time()
         try:
             logger.info(f"\n--- 후보: {algo.upper()} scratch ---")
+
+            # DB 로깅: 훈련 시작
+            try:
+                from rl_hybrid.rl.rl_db_logger import log_training_start, log_training_complete
+                algo_cycle_id = log_training_start(
+                    cycle_type="weekly",
+                    algorithm=algo,
+                    module="weekly_retrain",
+                    training_steps=total_steps,
+                    data_days=days,
+                    morl_enabled=use_morl,
+                )
+            except Exception:
+                pass
+
             TraderClass = get_trader_class(algo)
             train_env = BitcoinTradingEnv(
                 candles=train_candles, initial_balance=balance,
@@ -321,11 +419,36 @@ def weekly_retrain(days: int = 90, total_steps: int = 200_000, balance: float = 
                 save_freq=total_steps // 5,
             )
 
-            stats = evaluate_model(trader, eval_candles, eval_signals, balance)
+            stats = evaluate_model(trader, eval_candles, eval_signals, balance, sys_config=sys_config)
             candidates[f"{algo}_scratch"] = {"trader": trader, **stats}
             logger.info(f"  {algo} scratch 결과: 수익률={stats['avg_return']:.2f}%, 샤프={stats['avg_sharpe']:.3f}")
+
+            # DB 로깅: 훈련 완료
+            if algo_cycle_id:
+                try:
+                    log_training_complete(
+                        cycle_id=algo_cycle_id,
+                        avg_return_pct=stats['avg_return'],
+                        avg_sharpe=stats['avg_sharpe'],
+                        avg_mdd=stats['avg_mdd'],
+                        avg_trades=stats['avg_trades'],
+                        elapsed_seconds=time.time() - algo_start,
+                        status="completed",
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             logger.warning(f"{algo} scratch 훈련 실패: {e}")
+            if algo_cycle_id:
+                try:
+                    log_training_complete(
+                        cycle_id=algo_cycle_id,
+                        elapsed_seconds=time.time() - algo_start,
+                        status="failed",
+                        error_message=str(e)[:500],
+                    )
+                except Exception:
+                    pass
 
     if not candidates:
         logger.error("모든 후보 훈련 실패")
@@ -341,8 +464,9 @@ def weekly_retrain(days: int = 90, total_steps: int = 200_000, balance: float = 
                 candles=eval_candles, initial_balance=balance,
                 external_signals=eval_signals,
             )
+            eval_env = _maybe_wrap_morl(eval_env, sys_config)
             trader_current = TraderClass(env=eval_env, model_path=str(BEST_MODEL))
-            current_stats = evaluate_model(trader_current, eval_candles, eval_signals, balance)
+            current_stats = evaluate_model(trader_current, eval_candles, eval_signals, balance, sys_config=sys_config)
             candidates["current_best"] = {"trader": None, **current_stats}
             logger.info(f"\n현재 best 평가: 수익률={current_stats['avg_return']:.2f}%, 샤프={current_stats['avg_sharpe']:.3f}")
         except Exception as e:
@@ -410,7 +534,7 @@ def weekly_retrain(days: int = 90, total_steps: int = 200_000, balance: float = 
 
         logger.info(f"\n새 best 모델 교체 완료: {best_name} ({algo_name.upper()})")
         stage1_msg = (
-            f"주간 재학습 완료 — 모델 교체\n"
+            f"주간 재학습 완료 -- 모델 교체\n"
             f"후보: {best_name}\n"
             f"수익률: {best_result['avg_return']:.2f}%\n"
             f"샤프: {best_result['avg_sharpe']:.3f}\n"
@@ -419,10 +543,10 @@ def weekly_retrain(days: int = 90, total_steps: int = 200_000, balance: float = 
     else:
         logger.info("\n현재 best 모델 유지")
         stage1_msg = (
-            f"주간 재학습 완료 — 현재 모델 유지\n"
+            f"주간 재학습 완료 -- 현재 모델 유지\n"
             f"최적 후보({best_name}): 수익률={best_result['avg_return']:.2f}%\n"
             f"현재 best: 수익률={current_stats['avg_return']:.2f}%" if current_stats
-            else f"주간 재학습 완료 — 모델 유지"
+            else f"주간 재학습 완료 -- 모델 유지"
         )
 
     # ================================================================

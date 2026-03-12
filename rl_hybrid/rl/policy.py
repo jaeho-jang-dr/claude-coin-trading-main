@@ -22,7 +22,7 @@ try:
     SB3_AVAILABLE = True
 except ImportError:
     SB3_AVAILABLE = False
-    logger.warning("stable-baselines3 미설치 — RL 훈련 비활성화")
+    logger.warning("stable-baselines3 미설치 -- RL 훈련 비활성화")
 
 
 # 모델 저장 경로

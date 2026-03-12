@@ -189,6 +189,60 @@ def get_rl_advisory(market_data: dict, external_data: dict,
     ensemble_action = sum(actions) / len(actions) if actions else 0.0
     ensemble_direction = _action_to_direction(ensemble_action)
 
+    # ── 6. DB 기록: 앙상블 추론 결과 ──
+    try:
+        from rl_hybrid.rl.rl_db_logger import log_prediction as _log_pred
+
+        # 개별 모델 액션/버전 추출
+        sb3_info = advisories.get("sb3", {})
+        dt_info = advisories.get("dt", {})
+        ma_info = advisories.get("multi_agent", {})
+        offline_info = advisories.get("offline", {})
+
+        # SB3 버전: model_info.json에서 읽기
+        sb3_ver = None
+        try:
+            _info_path = PROJECT_DIR / "data" / "rl_models" / "best" / "model_info.json"
+            if _info_path.exists():
+                with open(_info_path) as _f:
+                    sb3_ver = json.load(_f).get("version_id")
+        except Exception:
+            pass
+
+        # Multi-Agent 세부 액션 추출
+        ma_consensus = ma_info.get("consensus", {}) if ma_info else {}
+        ma_scalp = ma_consensus.get("scalp_action") if isinstance(ma_consensus, dict) else None
+        ma_swing = ma_consensus.get("swing_action") if isinstance(ma_consensus, dict) else None
+
+        # 시장 컨텍스트
+        ticker = market_data.get("ticker", {})
+        indicators = market_data.get("indicators", {})
+        fgi_data = market_data.get("fear_greed", {})
+
+        _log_pred(
+            cycle_id=_CYCLE_ID,
+            ensemble_action=round(ensemble_action, 4),
+            ensemble_direction=ensemble_direction,
+            num_models=len(advisories),
+            sb3_action=sb3_info.get("action"),
+            sb3_version=sb3_ver,
+            dt_action=dt_info.get("action"),
+            dt_version=None,
+            multi_agent_action=ma_info.get("action"),
+            multi_agent_direction=_action_to_direction(ma_info["action"]) if ma_info.get("action") is not None else None,
+            multi_agent_scalp_action=ma_scalp,
+            multi_agent_swing_action=ma_swing,
+            offline_action=offline_info.get("action"),
+            offline_version=None,
+            btc_price=ticker.get("trade_price"),
+            rsi_14=indicators.get("rsi_14"),
+            fgi=fgi_data.get("value"),
+            danger_score=agent_state.get("danger_score"),
+            opportunity_score=agent_state.get("opportunity_score"),
+        )
+    except Exception as _db_err:
+        log(f"RL 추론 DB 기록 실패 (비치명적): {_db_err}")
+
     return {
         "action": round(ensemble_action, 4),
         "abs_action": round(abs(ensemble_action), 4),

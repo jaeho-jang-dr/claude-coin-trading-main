@@ -245,7 +245,7 @@ class OnlineExperienceBuffer:
                 self._save()
                 logger.info("버퍼 초기화 (모델 교체됨)")
             else:
-                logger.info("모델 미교체 — 버퍼 유지하여 다음 훈련에 누적")
+                logger.info("모델 미교체 -- 버퍼 유지하여 다음 훈련에 누적")
 
             return result
 

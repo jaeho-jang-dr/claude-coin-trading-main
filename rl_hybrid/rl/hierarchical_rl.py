@@ -47,7 +47,7 @@ try:
     SB3_AVAILABLE = True
 except ImportError:
     SB3_AVAILABLE = False
-    logger.warning("stable-baselines3 미설치 — Hierarchical RL 비활성화")
+    logger.warning("stable-baselines3 미설치 -- Hierarchical RL 비활성화")
 
 from rl_hybrid.rl.state_encoder import StateEncoder, OBSERVATION_DIM
 from rl_hybrid.rl.reward import RewardCalculator, TRANSACTION_COST
@@ -1107,7 +1107,7 @@ class HierarchicalTrainer:
 
         # ── Phase 1: 커리큘럼 (고정 conservative 전략) ──
         logger.info("=" * 60)
-        logger.info("Phase 1: 커리큘럼 — 고정 전략(conservative)으로 실행 에이전트 훈련")
+        logger.info("Phase 1: 커리큘럼 -- 고정 전략(conservative)으로 실행 에이전트 훈련")
         logger.info("=" * 60)
 
         self.exec_env.fixed_strategy = 0  # conservative
@@ -1348,9 +1348,9 @@ class HierarchicalOrchestrator:
                 self.meta_agent = MetaAgent(model_path=meta_path)
                 logger.info(f"HierarchicalOrchestrator: 메타 에이전트 로드 완료")
             except Exception as e:
-                logger.warning(f"메타 에이전트 로드 실패: {e} — 규칙 기반 폴백")
+                logger.warning(f"메타 에이전트 로드 실패: {e} -- 규칙 기반 폴백")
         else:
-            logger.warning(f"메타 에이전트 없음: {meta_path} — 규칙 기반 폴백")
+            logger.warning(f"메타 에이전트 없음: {meta_path} -- 규칙 기반 폴백")
 
     def select_strategy(
         self,

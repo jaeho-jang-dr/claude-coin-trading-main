@@ -755,7 +755,7 @@ class ParameterTuner:
             적용 성공 여부
         """
         if not approved:
-            logger.info("파라미터 조정 미승인 — 적용 안함")
+            logger.info("파라미터 조정 미승인 -- 적용 안함")
             return False
 
         if not proposal.get("changes"):
@@ -779,6 +779,20 @@ class ParameterTuner:
 
         # Supabase strategy_history에 기록
         self._log_to_supabase(record)
+
+        # DB 로깅: 개별 파라미터 변경 기록
+        try:
+            from rl_hybrid.rl.rl_db_logger import log_parameter_tuning
+            for name, (old_val, new_val) in proposal.get("changes", {}).items():
+                log_parameter_tuning(
+                    parameter_name=name,
+                    old_value=float(old_val),
+                    new_value=float(new_val),
+                    change_reason=proposal.get("reason", "auto_tuning"),
+                    approved=approved,
+                )
+        except Exception as e:
+            logger.debug(f"DB 파라미터 튜닝 기록 실패: {e}")
 
         logger.info(f"파라미터 조정 적용: {proposal['reason']}")
         return True
@@ -828,8 +842,25 @@ class ParameterTuner:
             for name, (old_val, _new_val) in latest.get("changes", {}).items():
                 rollback_params[name] = old_val
 
+            # DB 로깅: 롤백 기록
+            try:
+                from rl_hybrid.rl.rl_db_logger import log_parameter_tuning
+                for name, (old_val, new_val) in latest.get("changes", {}).items():
+                    log_parameter_tuning(
+                        parameter_name=name,
+                        old_value=float(new_val),
+                        new_value=float(old_val),
+                        change_reason="rollback",
+                        before_sharpe=sharpe_before,
+                        after_sharpe=sharpe_after,
+                        rolled_back=True,
+                        rollback_reason=f"Sharpe drop: {sharpe_before:.4f} → {sharpe_after:.4f}",
+                    )
+            except Exception:
+                pass
+
             logger.warning(
-                f"성과 악화 (Sharpe {sharpe_before:.4f} → {sharpe_after:.4f}) — "
+                f"성과 악화 (Sharpe {sharpe_before:.4f} -> {sharpe_after:.4f}) -- "
                 f"파라미터 롤백: {rollback_params}"
             )
             return rollback_params

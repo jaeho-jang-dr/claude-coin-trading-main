@@ -68,7 +68,7 @@ def prepare_data(days: int = 180, interval: str = "1h"):
         if raw_signals:
             aligned_signals = loader.align_external_to_candles(candles, raw_signals)
     except Exception as e:
-        logger.warning(f"외부 시그널 로드/정렬 실패 — 기본값 사용: {e}")
+        logger.warning(f"외부 시그널 로드/정렬 실패 -- 기본값 사용: {e}")
 
     # 80/20 분리
     split = int(len(candles) * 0.8)
@@ -85,7 +85,7 @@ def prepare_data(days: int = 180, interval: str = "1h"):
             f"평가={len(eval_signals)}건"
         )
     else:
-        logger.info("외부 시그널 없음 — 환경에서 기본 상수값 사용")
+        logger.info("외부 시그널 없음 -- 환경에서 기본 상수값 사용")
 
     logger.info(
         f"데이터 준비 완료: 훈련={len(train_candles)}봉, 평가={len(eval_candles)}봉 "
@@ -145,7 +145,7 @@ def prepare_edge_case_data(
             ]
             aligned_signals = real_aligned + synth_defaults
     except Exception as e:
-        logger.warning(f"외부 시그널 로드/정렬 실패 — 기본값 사용: {e}")
+        logger.warning(f"외부 시그널 로드/정렬 실패 -- 기본값 사용: {e}")
 
     # 80/20 분리
     split = int(len(candles) * 0.8)

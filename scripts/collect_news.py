@@ -27,6 +27,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 
 TAVILY_API = "https://api.tavily.com/search"
+DAILY_LIMIT = 33
 MONTHLY_LIMIT = 999
 USAGE_FILE = Path(__file__).resolve().parent.parent / "data" / "tavily_usage.json"
 
@@ -87,13 +88,22 @@ def _build_queries() -> list:
 
 
 def _load_usage() -> dict:
-    """월별 사용량 파일 로드. 월이 바뀌면 자동 리셋."""
-    current_month = datetime.now().strftime("%Y-%m")
+    """월별+일별 사용량 파일 로드. 월/일이 바뀌면 자동 리셋."""
+    now = datetime.now()
+    current_month = now.strftime("%Y-%m")
+    current_day = now.strftime("%Y-%m-%d")
+
     if USAGE_FILE.exists():
         data = json.loads(USAGE_FILE.read_text(encoding="utf-8"))
         if data.get("month") == current_month:
+            # 일별 카운트 확인/리셋
+            daily = data.get("daily", {})
+            if current_day not in daily:
+                daily[current_day] = 0
+            data["daily"] = daily
             return data
-    return {"month": current_month, "count": 0}
+
+    return {"month": current_month, "count": 0, "daily": {current_day: 0}}
 
 
 def _save_usage(data: dict):
@@ -102,8 +112,13 @@ def _save_usage(data: dict):
 
 
 def _budget_queries(usage: dict) -> list:
-    """잔여 한도에 맞춰 쿼리를 조정한다."""
-    remaining = MONTHLY_LIMIT - usage["count"]
+    """일별(33) + 월별(999) 한도에 맞춰 쿼리를 조정한다."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    daily_used = usage.get("daily", {}).get(today, 0)
+    monthly_remaining = MONTHLY_LIMIT - usage["count"]
+    daily_remaining = DAILY_LIMIT - daily_used
+    remaining = min(monthly_remaining, daily_remaining)
+
     if remaining <= 0:
         return []
 
@@ -158,13 +173,15 @@ def main():
     if not api_key:
         raise RuntimeError("TAVILY_API_KEY 환경변수가 설정되지 않았습니다.")
 
+    today = datetime.now().strftime("%Y-%m-%d")
     usage = _load_usage()
     queries = _budget_queries(usage)
 
     if not queries:
-        remaining = MONTHLY_LIMIT - usage["count"]
+        daily_used = usage.get("daily", {}).get(today, 0)
         raise RuntimeError(
-            f"Tavily 월간 한도 소진: {usage['count']}/{MONTHLY_LIMIT} (잔여 {remaining}건)"
+            f"Tavily 한도 소진 — 일간: {daily_used}/{DAILY_LIMIT}, "
+            f"월간: {usage['count']}/{MONTHLY_LIMIT}"
         )
 
     api_calls = 0
@@ -182,6 +199,7 @@ def main():
 
     # API 호출 수 기준으로 사용량 기록 (실제 성공한 호출만 카운트)
     usage["count"] += api_calls
+    usage.setdefault("daily", {})[today] = usage["daily"].get(today, 0) + api_calls
     _save_usage(usage)
 
     articles_list = list(all_articles.values())
@@ -204,13 +222,14 @@ def main():
         "articles": articles_list,
         "tavily_usage": {
             "month": usage["month"],
-            "api_calls_used": usage["count"],
-            "limit": MONTHLY_LIMIT,
-            "remaining": MONTHLY_LIMIT - usage["count"],
+            "monthly_used": usage["count"],
+            "monthly_limit": MONTHLY_LIMIT,
+            "monthly_remaining": MONTHLY_LIMIT - usage["count"],
+            "daily_used": usage.get("daily", {}).get(today, 0),
+            "daily_limit": DAILY_LIMIT,
+            "daily_remaining": DAILY_LIMIT - usage.get("daily", {}).get(today, 0),
             "this_run_calls": api_calls,
             "day_type": f"{day_type} ({api_calls} calls/run)",
-            "daily_budget": f"{calls_per_day}/day ({day_type})",
-            "monthly_projection": "weekday 30 x 22 + weekend 36 x 9 = 984/month",
         },
     }
     print(json.dumps(result, indent=2, ensure_ascii=False))

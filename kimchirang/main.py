@@ -23,6 +23,8 @@ from kimchirang.config import KimchirangConfig
 from kimchirang.data_feeder import DataFeeder
 from kimchirang.kp_engine import KPEngine
 from kimchirang.execution import Executor
+from kimchirang.notifier import KimchirangNotifier
+from kimchirang.db import KimchirangDB
 
 logger = logging.getLogger("kimchirang.main")
 
@@ -109,6 +111,8 @@ class KimchirangBot:
         self.engine = KPEngine(self.config, self.feeder.state)
         self.executor = Executor(self.config)
         self.rl_bridge = RLBridge(self.config)
+        self.notifier = KimchirangNotifier()
+        self.db = KimchirangDB(self.config.db)
         self._running = False
         self._tick_count = 0
 
@@ -128,6 +132,12 @@ class KimchirangBot:
 
         # RL 모델 로드
         self.rl_bridge.load()
+
+        # Binance 레버리지 설정
+        lev_ok = await self.executor.set_leverage()
+        if not lev_ok and not self.config.trading.dry_run:
+            logger.error("Binance 레버리지 설정 실패 -- 실매매 모드에서 중단")
+            return
 
         # 데이터 피더 시작
         await self.feeder.start()
@@ -167,10 +177,11 @@ class KimchirangBot:
         if not snapshot.is_valid:
             return
 
+        stats = self.engine.get_stats()
+        pos = self.executor.get_position_info()
+
         # 2. 주기적 상태 로그 (10초마다)
         if self._tick_count % 10 == 0:
-            stats = self.engine.get_stats()
-            pos = self.executor.get_position_info()
             logger.info(
                 f"[KP] mid={stats['mid_kp']:+.2f}% "
                 f"entry={stats['entry_kp']:+.2f}% "
@@ -181,6 +192,10 @@ class KimchirangBot:
                 f"| FR={stats['funding_rate']*100:+.4f}% "
                 f"| pos={pos['side']}"
             )
+
+        # 2b. 주기적 텔레그램 상태 보고 (5분마다)
+        if self._tick_count % 300 == 0:
+            await self.notifier.notify_status(stats, pos)
 
         # 3. 데이터 신선도 체크
         age = self.feeder.state.data_age_sec
@@ -195,17 +210,33 @@ class KimchirangBot:
         # 5. 주문 실행
         if action == ACTION_ENTER:
             result = await self.executor.enter(snapshot)
-            await self._notify(f"진입: {result.summary()}")
+            if result.both_success:
+                await self.notifier.notify_enter(result, snapshot)
+                await self.db.record_trade(result, snapshot, stats=stats)
 
         elif action == ACTION_EXIT:
+            hold_min = self.executor.position.hold_duration_min
             result = await self.executor.exit(snapshot)
-            await self._notify(f"청산: {result.summary()}")
+            if result.both_success:
+                pnl = self.executor._calculate_pnl(result, snapshot)
+                await self.notifier.notify_exit(result, snapshot, pnl)
+                await self.db.record_trade(
+                    result, snapshot, pnl=pnl, stats=stats,
+                    hold_duration_min=hold_min,
+                )
 
         # 6. 손절 체크 (포지션 보유 중)
         if self.executor.position.is_open and self.engine.should_stop_loss(snapshot):
             logger.warning(f"손절 트리거: KP={snapshot.mid_kp:.2f}%")
+            hold_min = self.executor.position.hold_duration_min
             result = await self.executor.exit(snapshot)
-            await self._notify(f"손절: {result.summary()}")
+            if result.both_success:
+                pnl = self.executor._calculate_pnl(result, snapshot)
+                await self.notifier.notify_stop_loss(result, snapshot, pnl)
+                await self.db.record_trade(
+                    result, snapshot, pnl=pnl, stats=stats,
+                    hold_duration_min=hold_min,
+                )
 
     def _decide_action(self, snapshot) -> int:
         """RL + 규칙 기반 하이브리드 결정"""
@@ -233,24 +264,12 @@ class KimchirangBot:
 
         return ACTION_HOLD
 
-    async def _notify(self, message: str):
-        """텔레그램 알림 (비동기)"""
-        try:
-            import subprocess
-            subprocess.Popen(
-                [sys.executable, "scripts/notify_telegram.py", "trade",
-                 f"[Kimchirang] {message}", ""],
-                cwd=PROJECT_DIR,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
-
     async def _shutdown(self):
         """정리 종료"""
         logger.info("Kimchirang 종료 중...")
         self._running = False
+        # 포지션 상태 최종 저장
+        self.executor._save_state()
         await self.executor.close()
         await self.feeder.stop()
         logger.info("Kimchirang 종료 완료")

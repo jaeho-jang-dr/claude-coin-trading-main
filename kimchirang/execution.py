@@ -94,14 +94,52 @@ class PositionState:
             return 0
         return (time.time() - self.entry_time) / 60
 
+    def to_dict(self) -> dict:
+        """직렬화"""
+        return {
+            "side": self.side.value,
+            "entry_kp": self.entry_kp,
+            "entry_time": self.entry_time,
+            "upbit_qty": self.upbit_qty,
+            "binance_qty": self.binance_qty,
+            "upbit_entry_price": self.upbit_entry_price,
+            "binance_entry_price": self.binance_entry_price,
+            "trade_count_today": self.trade_count_today,
+            "last_trade_time": self.last_trade_time,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PositionState":
+        """역직렬화"""
+        side_str = d.get("side", "none")
+        try:
+            side = PositionSide(side_str)
+        except ValueError:
+            side = PositionSide.NONE
+        return cls(
+            side=side,
+            entry_kp=d.get("entry_kp", 0.0),
+            entry_time=d.get("entry_time", 0.0),
+            upbit_qty=d.get("upbit_qty", 0.0),
+            binance_qty=d.get("binance_qty", 0.0),
+            upbit_entry_price=d.get("upbit_entry_price", 0.0),
+            binance_entry_price=d.get("binance_entry_price", 0.0),
+            trade_count_today=d.get("trade_count_today", 0),
+            last_trade_time=d.get("last_trade_time", 0.0),
+        )
+
 
 class Executor:
     """Delta-Neutral 주문 실행기"""
 
     def __init__(self, config: KimchirangConfig):
         self.config = config
-        self.position = PositionState()
         self._session: Optional[aiohttp.ClientSession] = None
+
+        # 포지션 영속성: 파일에서 복원
+        from kimchirang.state import load_position
+        saved = load_position()
+        self.position = PositionState.from_dict(saved)
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -220,6 +258,7 @@ class Executor:
             self.position.binance_entry_price = result.binance_leg.filled_price
             self.position.trade_count_today += 1
             self.position.last_trade_time = time.time()
+            self._save_state()
 
         logger.info(result.summary())
         return result
@@ -291,6 +330,7 @@ class Executor:
             self.position.binance_qty = 0
             self.position.trade_count_today += 1
             self.position.last_trade_time = time.time()
+            self._save_state()
 
         logger.info(result.summary())
         return result
@@ -455,6 +495,55 @@ class Executor:
         kp_diff = self.position.entry_kp - snapshot.exit_kp
         fee_pct = (0.05 + 0.04) * 2  # 양쪽 왕복 수수료
         return kp_diff - fee_pct
+
+    def _save_state(self):
+        """포지션 상태를 파일에 저장"""
+        from kimchirang.state import save_position
+        save_position(self.position.to_dict())
+
+    async def set_leverage(self) -> bool:
+        """Binance Futures 레버리지 설정 (봇 시작 시 1회 호출)"""
+        leverage = self.config.trading.leverage
+
+        if self.config.trading.dry_run:
+            logger.info(f"[DRY RUN] 레버리지 {leverage}x 설정 (시뮬)")
+            return True
+
+        import hashlib
+        import hmac
+        import urllib.parse
+
+        api_key = self.config.binance.api_key
+        api_secret = self.config.binance.api_secret
+
+        params = {
+            "symbol": self.config.trading.binance_futures_symbol,
+            "leverage": str(leverage),
+            "timestamp": str(int(time.time() * 1000)),
+        }
+
+        query_string = urllib.parse.urlencode(params)
+        signature = hmac.new(
+            api_secret.encode(), query_string.encode(), hashlib.sha256
+        ).hexdigest()
+        params["signature"] = signature
+
+        try:
+            session = await self._get_session()
+            async with session.post(
+                f"{self.config.binance.rest_url}/fapi/v1/leverage",
+                headers={"X-MBX-APIKEY": api_key},
+                params=params,
+            ) as resp:
+                data = await resp.json()
+                if resp.status == 200:
+                    logger.info(f"Binance 레버리지 {leverage}x 설정 완료")
+                    return True
+                logger.error(f"Binance 레버리지 설정 실패: {data}")
+                return False
+        except Exception as e:
+            logger.error(f"Binance 레버리지 설정 오류: {e}")
+            return False
 
     def get_position_info(self) -> dict:
         """현재 포지션 정보"""

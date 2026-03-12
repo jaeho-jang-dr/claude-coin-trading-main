@@ -20,6 +20,7 @@ Phase 5: 스트레스 테스트 — v8 Hybrid, 4h 캔들, 70K steps (~8분)
 
 from __future__ import annotations
 
+import hide_console
 import argparse
 import json
 import logging

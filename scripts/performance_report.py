@@ -9,6 +9,7 @@
   python scripts/performance_report.py --backtest    # 최근 30일 백테스트
 """
 
+import hide_console
 import argparse
 import json
 import os

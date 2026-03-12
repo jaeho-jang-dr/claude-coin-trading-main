@@ -16,6 +16,7 @@ RL 학습 통합 스케줄러
   python scripts/training_scheduler.py remove         # Task Scheduler 해제
 """
 
+import hide_console
 import argparse
 import json
 import logging

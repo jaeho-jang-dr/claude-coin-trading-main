@@ -9,6 +9,7 @@
 실행: .venv\\Scripts\\python.exe scripts\\web_server.py
 """
 
+import hide_console
 import http.server
 import json
 import os

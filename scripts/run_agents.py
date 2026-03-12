@@ -7,6 +7,7 @@ Python 기반 에이전트 모드 파이프라인 (Cross-platform 지원)
   python scripts/run_agents.py
 """
 
+import hide_console
 import asyncio
 import json
 import os

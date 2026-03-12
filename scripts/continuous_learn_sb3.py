@@ -10,6 +10,7 @@ SB3 PPO 모델에 맞게 새로 작성.
   python scripts/continuous_learn_sb3.py --interval 4  # 4시간 간격
 """
 
+import hide_console
 import argparse
 import json
 import logging

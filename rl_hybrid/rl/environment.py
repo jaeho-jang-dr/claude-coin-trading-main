@@ -76,6 +76,7 @@ class BitcoinTradingEnv(gym.Env):
         if self.end_idx <= self.start_idx:
             self.end_idx = len(candles) - 1
             self.start_idx = min(self.start_idx, self.end_idx - 1)
+        self.start_idx = max(0, self.start_idx)
 
         # 관측 공간: 42차원 (현재 상태) + lookback * 5 (과거 OHLCV 압축)
         # 간소화: 42차원만 사용 (과거 정보는 지표에 이미 반영)
@@ -461,10 +462,10 @@ class BitcoinTradingEnvWithLLM(BitcoinTradingEnv):
         self.llm_embedding_dim = llm_embedding_dim
         self.llm_embedding = np.zeros(llm_embedding_dim, dtype=np.float32)
 
-        # 관측 공간 확장
+        # 관측 공간 확장 (LLM 임베딩은 음수 가능)
         total_dim = OBSERVATION_DIM + llm_embedding_dim
         self.observation_space = spaces.Box(
-            low=0.0, high=1.0, shape=(total_dim,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(total_dim,), dtype=np.float32
         )
 
     def set_llm_embedding(self, embedding: np.ndarray):

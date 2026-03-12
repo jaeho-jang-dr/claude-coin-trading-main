@@ -35,12 +35,14 @@ class RewardCalculator:
 
         self.returns_history: deque[float] = deque(maxlen=window_size)
         self.peak_value = 0.0
+        self.max_drawdown = 0.0
         self.total_trades = 0
         self.steps_since_last_trade = 0
 
     def reset(self, initial_value: float):
         self.returns_history.clear()
         self.peak_value = initial_value
+        self.max_drawdown = 0.0
         self.total_trades = 0
         self.steps_since_last_trade = 0
 
@@ -62,6 +64,7 @@ class RewardCalculator:
         # 3. MDD 페널티 (5% 초과 시)
         self.peak_value = max(self.peak_value, curr_portfolio_value)
         drawdown = (self.peak_value - curr_portfolio_value) / self.peak_value
+        self.max_drawdown = max(self.max_drawdown, drawdown)
         mdd_penalty = -drawdown * self.max_drawdown_penalty if drawdown > 0.05 else 0
 
         # 4. 수익 실현 보너스 — 포지션 변경 후 이익이면 보상
@@ -139,7 +142,7 @@ class RewardCalculator:
             "total_trades": self.total_trades,
             "avg_return": float(returns.mean()) if len(returns) > 0 else 0,
             "std_return": float(returns.std()) if len(returns) > 1 else 0,
-            "max_drawdown": float((self.peak_value - final_value) / self.peak_value),
+            "max_drawdown": float(max(self.max_drawdown, (self.peak_value - final_value) / self.peak_value if self.peak_value > 0 else 0)),
             "sharpe_ratio": float(
                 (returns.mean() - self.risk_free_rate) / returns.std()
                 if len(returns) > 1 and returns.std() > 1e-8

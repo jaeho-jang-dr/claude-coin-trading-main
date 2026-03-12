@@ -545,7 +545,7 @@ class ExternalDataAgent:
         bs = results.get("binance_sentiment", {})
         sentiment = bs.get("sentiment_score", {})
         bs_score = sentiment.get("score", 0) if isinstance(sentiment, dict) else 0
-        score -= bs_score
+        score += bs_score
 
         # 고래 활동
         wt = results.get("whale_tracker", {})

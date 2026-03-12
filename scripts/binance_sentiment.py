@@ -28,6 +28,8 @@ if sys.stdout.encoding != "utf-8":
 if sys.stderr.encoding != "utf-8":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import requests
 
 # ── 설정 ──────────────────────────────────────────────
@@ -40,15 +42,28 @@ REQUEST_TIMEOUT = 15
 MAX_RETRIES = 3
 RATE_LIMIT_WAIT = 0.2
 
+# 커넥션 재사용을 위한 세션
+_session: requests.Session | None = None
+
+
+def _get_session() -> requests.Session:
+    """모듈 레벨 requests.Session을 반환한다 (커넥션 풀 재사용)."""
+    global _session
+    if _session is None:
+        _session = requests.Session()
+        _session.headers.update({"Accept": "application/json"})
+    return _session
+
 
 # ── HTTP 헬퍼 ─────────────────────────────────────────
 
 
 def _get(url: str, params: dict | None = None, label: str = "") -> dict | list | None:
-    """Exponential backoff 포함 GET 요청."""
+    """Exponential backoff 포함 GET 요청 (Session 재사용)."""
+    session = _get_session()
     for attempt in range(MAX_RETRIES):
         try:
-            resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            resp = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
             if resp.status_code == 200:
                 return resp.json()
             if resp.status_code == 429:
@@ -405,19 +420,29 @@ def compute_sentiment_score(
 
 
 def main() -> None:
-    top_ls = fetch_top_long_short_ratio()
-    time.sleep(RATE_LIMIT_WAIT)
+    # 독립적인 API 호출을 병렬로 실행하여 지연 시간 절감
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {
+            executor.submit(fetch_top_long_short_ratio): "top_ls",
+            executor.submit(fetch_global_long_short_ratio): "global_ls",
+            executor.submit(fetch_funding_rate): "funding",
+            executor.submit(fetch_open_interest): "oi",
+            executor.submit(fetch_kimchi_premium): "kimchi",
+        }
+        results = {}
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                results[key] = future.result()
+            except Exception as e:
+                print(f"[binance_sentiment] {key} 실패: {e}", file=sys.stderr)
+                results[key] = {"error": str(e)}
 
-    global_ls = fetch_global_long_short_ratio()
-    time.sleep(RATE_LIMIT_WAIT)
-
-    funding = fetch_funding_rate()
-    time.sleep(RATE_LIMIT_WAIT)
-
-    oi = fetch_open_interest()
-    time.sleep(RATE_LIMIT_WAIT)
-
-    kimchi = fetch_kimchi_premium()
+    top_ls = results["top_ls"]
+    global_ls = results["global_ls"]
+    funding = results["funding"]
+    oi = results["oi"]
+    kimchi = results["kimchi"]
 
     sentiment = compute_sentiment_score(top_ls, funding, oi, kimchi)
 

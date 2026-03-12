@@ -15,7 +15,24 @@
         result = buf.micro_train()
 """
 
-import fcntl
+try:
+    import fcntl
+    def _flock(f, op):
+        fcntl.flock(f, op)
+    _LOCK_SH = fcntl.LOCK_SH
+    _LOCK_EX = fcntl.LOCK_EX
+    _LOCK_UN = fcntl.LOCK_UN
+except ImportError:
+    import msvcrt
+    def _flock(f, op):
+        # Windows: use msvcrt for basic file locking
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK if op else msvcrt.LK_UNLCK, 1)
+        except (OSError, IOError):
+            pass
+    _LOCK_SH = 1
+    _LOCK_EX = 2
+    _LOCK_UN = 0
 import json
 import logging
 import os
@@ -50,9 +67,9 @@ class OnlineExperienceBuffer:
         if BUFFER_PATH.exists():
             try:
                 with open(BUFFER_PATH, "r") as f:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+                    _flock(f, _LOCK_SH)
                     data = json.load(f)
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    _flock(f, _LOCK_UN)
                     return data
             except Exception:
                 return []
@@ -61,9 +78,9 @@ class OnlineExperienceBuffer:
     def _save(self):
         MODEL_DIR.mkdir(parents=True, exist_ok=True)
         with open(BUFFER_PATH, "w") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            _flock(f, _LOCK_EX)
             json.dump(self.buffer, f, ensure_ascii=False, indent=1)
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            _flock(f, _LOCK_UN)
 
     def add_experience(
         self,

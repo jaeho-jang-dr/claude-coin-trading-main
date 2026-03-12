@@ -267,14 +267,16 @@ def check_lock() -> bool:
     except Exception:
         return True
 
-def acquire_lock(process_name: str):
-    """락파일 생성"""
+def acquire_lock(owner="short_term"):
+    """락파일 생성 (atomic exclusive create)"""
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    LOCK_FILE.write_text(json.dumps({
-        "process": process_name,
-        "pid": os.getpid(),
-        "timestamp": datetime.now(KST).isoformat(),
-    }))
+    try:
+        fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, 'w') as f:
+            json.dump({"owner": owner, "pid": os.getpid(), "time": datetime.now(KST).isoformat()}, f)
+        return True
+    except FileExistsError:
+        return False
 
 def release_lock():
     """락파일 해제"""
@@ -966,6 +968,17 @@ class ShortTermTrader:
         """매매 가능 여부 확인"""
         if os.environ.get("EMERGENCY_STOP", "false").lower() == "true":
             return False, "EMERGENCY_STOP 활성화"
+        # Check auto emergency stop
+        auto_em_file = Path(__file__).resolve().parent.parent / "data" / "auto_emergency.json"
+        if auto_em_file.exists():
+            try:
+                with open(auto_em_file) as f:
+                    em_data = json.load(f)
+                if em_data.get("active", False):
+                    log.warning("자동 긴급정지 활성화 - 매매 차단")
+                    return False, "자동 긴급정지 활성화"
+            except Exception:
+                pass
         if self.daily_trade_count >= SHORT_TERM_MAX_DAILY:
             return False, "daily_limit"
         if self.used_budget >= SHORT_TERM_BUDGET:
@@ -1036,6 +1049,9 @@ class ShortTermTrader:
             if not check_lock():
                 log.warning("정규 매매 실행 중 — 매수 보류")
                 return
+            if not acquire_lock("short_term"):
+                log.warning("락 획득 실패 — 매수 보류")
+                return
             try:
                 result = upbit_order("bid", MARKET, str(amount))
                 if not result["ok"]:
@@ -1065,6 +1081,8 @@ class ShortTermTrader:
                 if self.consecutive_errors >= self.MAX_CONSECUTIVE_ERRORS:
                     self.emergency_stop(f"연속 예외: {e}")
                 return
+            finally:
+                release_lock()
 
         pos = Position(
             strategy=signal.strategy,
@@ -1116,6 +1134,7 @@ class ShortTermTrader:
         )
 
         if not self.dry_run:
+            acquire_lock("short_term_exit")
             try:
                 result = upbit_order("ask", MARKET, f"{pos.btc_qty:.8f}")
                 if not result["ok"]:
@@ -1139,6 +1158,8 @@ class ShortTermTrader:
                 if self.consecutive_errors >= self.MAX_CONSECUTIVE_ERRORS:
                     self.emergency_stop(f"매도 예외: {e}")
                 return
+            finally:
+                release_lock()
 
         pos.exit_price = exit_price
         pos.exit_time = datetime.now(KST)
@@ -1149,6 +1170,7 @@ class ShortTermTrader:
         self.closed_positions.append(pos)
         self.daily_trade_count += 1
         self.daily_pnl += pnl_krw
+        self.used_budget = max(0, self.used_budget - pos.amount_krw)
         self._last_block_reason.clear()
 
         # v4: 완결된 거래를 scalp_trade_log에 기록

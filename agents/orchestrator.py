@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -35,7 +36,30 @@ AGENTS = {
 }
 
 
+import time as _time
+
+
+def _acquire_lock(lock_path: str, retries: int = 10, wait: float = 0.1):
+    for _ in range(retries):
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return True
+        except FileExistsError:
+            _time.sleep(wait)
+    return False
+
+
+def _release_lock(lock_path: str):
+    try:
+        os.remove(lock_path)
+    except OSError:
+        pass
+
+
 def _load_state() -> dict:
+    lock_path = str(STATE_FILE) + ".lock"
+    _acquire_lock(lock_path)
     try:
         with open(STATE_FILE, encoding="utf-8") as f:
             return json.load(f)
@@ -47,12 +71,19 @@ def _load_state() -> dict:
             "consecutive_losses": 0,
             "switch_history": [],
         }
+    finally:
+        _release_lock(lock_path)
 
 
 def _save_state(state: dict) -> None:
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+    lock_path = str(STATE_FILE) + ".lock"
+    _acquire_lock(lock_path)
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    finally:
+        _release_lock(lock_path)
 
 
 class Orchestrator:
@@ -260,6 +291,14 @@ class Orchestrator:
         rsi = market_data.get("indicators", {}).get("rsi_14", 50)
         price_change_24h = market_data.get("ticker", {}).get("signed_change_rate", 0) * 100
         btc_ratio = portfolio.get("btc_ratio", 0)
+        if btc_ratio == 0:
+            btc_eval = 0
+            for h in portfolio.get("holdings", []):
+                if h.get("currency") == "BTC":
+                    btc_eval = h.get("eval_amount", 0)
+                    break
+            total_eval = portfolio.get("total_eval", 1) or 1
+            btc_ratio = btc_eval / total_eval
         consecutive_losses = self._count_consecutive_losses(past_decisions)
         self.state["consecutive_losses"] = consecutive_losses
 
@@ -603,6 +642,8 @@ class Orchestrator:
             try:
                 kst = timezone(timedelta(hours=9))
                 switch_dt = datetime.fromisoformat(last_switch)
+                if switch_dt.tzinfo is None:
+                    switch_dt = switch_dt.replace(tzinfo=kst)
                 now = datetime.now(kst)
                 if now - switch_dt < timedelta(hours=cooldown_hours):
                     return True
@@ -1008,6 +1049,12 @@ class Orchestrator:
         # ① DCA인데 캐스케이딩 극심 → 매도로 전환
         if decision.decision == "buy" and is_dca and cascade >= 70:
             btc_holding = {}  # 매도 볼륨은 에이전트가 이미 계산했을 수 있음
+            sell_trade_params = {
+                "market": "KRW-BTC",
+                "side": "ask",
+                "volume": None,  # sell all BTC (execute_trade.py handles full-sell)
+                "ord_type": "market",
+            }
             overridden = Dec(
                 decision="sell",
                 confidence=0.85,
@@ -1018,7 +1065,7 @@ class Orchestrator:
                     f"약세지표 {drop_context['external_bearish_count']}개)"
                 ),
                 buy_score=decision.buy_score,
-                trade_params=decision.trade_params,  # 실행 스크립트에서 재처리
+                trade_params=sell_trade_params,
                 external_signal=decision.external_signal,
                 agent_name=f"🎯 감독 오버라이드 ({decision.agent_name})",
             )
@@ -1254,7 +1301,7 @@ class Orchestrator:
             title = "자동 긴급정지 발동" if action == "activate" else "자동 긴급정지 해제"
             subprocess.run(
                 [
-                    "python3", "scripts/notify_telegram.py",
+                    sys.executable, "scripts/notify_telegram.py",
                     "error", f"{emoji} {title}", reason,
                 ],
                 capture_output=True,

@@ -235,7 +235,7 @@ class TestSubmitToDb:
              patch("rl_hybrid.rl.trainer_submit.save_local", return_value=True) as mock_save:
             # Remove SUPABASE vars if present
             os.environ.pop("SUPABASE_URL", None)
-            os.environ.pop("SUPABASE_SERVICE_KEY", None)
+            os.environ.pop("SUPABASE_SERVICE_ROLE_KEY", None)
 
             ret = submit_to_db(result)
             mock_save.assert_called_once_with(result)
@@ -244,7 +244,7 @@ class TestSubmitToDb:
     def test_empty_supabase_url_falls_back(self):
         result = {"trainer_id": "test"}
 
-        with patch.dict(os.environ, {"SUPABASE_URL": "", "SUPABASE_SERVICE_KEY": "key"}), \
+        with patch.dict(os.environ, {"SUPABASE_URL": "", "SUPABASE_SERVICE_ROLE_KEY": "key"}), \
              patch("rl_hybrid.rl.trainer_submit.save_local", return_value=True) as mock_save:
             ret = submit_to_db(result)
             mock_save.assert_called_once_with(result)
@@ -253,7 +253,7 @@ class TestSubmitToDb:
     def test_empty_supabase_key_falls_back(self):
         result = {"trainer_id": "test"}
 
-        with patch.dict(os.environ, {"SUPABASE_URL": "https://x.supabase.co", "SUPABASE_SERVICE_KEY": ""}), \
+        with patch.dict(os.environ, {"SUPABASE_URL": "https://x.supabase.co", "SUPABASE_SERVICE_ROLE_KEY": ""}), \
              patch("rl_hybrid.rl.trainer_submit.save_local", return_value=True) as mock_save:
             ret = submit_to_db(result)
             mock_save.assert_called_once()
@@ -266,7 +266,7 @@ class TestSubmitToDb:
 
         with patch.dict(os.environ, {
             "SUPABASE_URL": "https://x.supabase.co",
-            "SUPABASE_SERVICE_KEY": "secret",
+            "SUPABASE_SERVICE_ROLE_KEY": "secret",
         }), patch("requests.post", return_value=mock_resp):
             import requests  # ensure it's importable in this context
             ret = submit_to_db(result)
@@ -280,7 +280,7 @@ class TestSubmitToDb:
 
         with patch.dict(os.environ, {
             "SUPABASE_URL": "https://x.supabase.co",
-            "SUPABASE_SERVICE_KEY": "secret",
+            "SUPABASE_SERVICE_ROLE_KEY": "secret",
         }), patch("requests.post", return_value=mock_resp), \
              patch("rl_hybrid.rl.trainer_submit.save_local", return_value=True) as mock_save:
             ret = submit_to_db(result)
@@ -291,7 +291,7 @@ class TestSubmitToDb:
 
         with patch.dict(os.environ, {
             "SUPABASE_URL": "https://x.supabase.co",
-            "SUPABASE_SERVICE_KEY": "secret",
+            "SUPABASE_SERVICE_ROLE_KEY": "secret",
         }), patch("requests.post", side_effect=ConnectionError("timeout")), \
              patch("rl_hybrid.rl.trainer_submit.save_local", return_value=True) as mock_save:
             ret = submit_to_db(result)
@@ -305,7 +305,7 @@ class TestSubmitToDb:
 
         with patch.dict(os.environ, {
             "SUPABASE_URL": "https://x.supabase.co",
-            "SUPABASE_SERVICE_KEY": "secret",
+            "SUPABASE_SERVICE_ROLE_KEY": "secret",
         }), patch("requests.post", return_value=mock_resp):
             assert submit_to_db(result) is True
 
@@ -317,7 +317,7 @@ class TestSubmitToDb:
 
         with patch.dict(os.environ, {
             "SUPABASE_URL": "https://x.supabase.co",
-            "SUPABASE_SERVICE_KEY": "secret",
+            "SUPABASE_SERVICE_ROLE_KEY": "secret",
         }), patch("requests.post", return_value=mock_resp):
             # Should still return True, with record_id="?"
             assert submit_to_db(result) is True

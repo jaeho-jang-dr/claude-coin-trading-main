@@ -27,14 +27,28 @@ import requests
 
 UPBIT_API = "https://api.upbit.com/v1"
 
+# 커넥션 재사용을 위한 세션
+_session: requests.Session | None = None
+
+
+def _get_session() -> requests.Session:
+    """모듈 레벨 requests.Session을 반환한다 (커넥션 풀 재사용)."""
+    global _session
+    if _session is None:
+        _session = requests.Session()
+        _session.headers.update({"Accept": "application/json"})
+    return _session
+
 
 # ── API 호출 (Exponential Backoff 포함) ─────────────────
 def api_get(path: str, params: dict | None = None, max_retries: int = 3) -> dict | list:
+    session = _get_session()
     url = f"{UPBIT_API}{path}"
     if params:
         url += "?" + "&".join(f"{k}={v}" for k, v in params.items())
+    r = None
     for attempt in range(max_retries):
-        r = requests.get(url, timeout=10)
+        r = session.get(url, timeout=10)
         if r.status_code == 429:
             wait = 2 ** attempt  # 1s, 2s, 4s
             print(f"[rate_limit] 429 received, retrying in {wait}s...", file=sys.stderr)
@@ -42,12 +56,17 @@ def api_get(path: str, params: dict | None = None, max_retries: int = 3) -> dict
             continue
         r.raise_for_status()
         return r.json()
-    r.raise_for_status()
-    return r.json()
+    # All retries exhausted
+    if r is not None:
+        r.raise_for_status()
+        return r.json()
+    raise requests.exceptions.ConnectionError(f"API request failed after {max_retries} retries")
 
 
 # ── 기술적 지표 계산 ────────────────────────────────────
-def sma(prices: list[float], period: int) -> float:
+def sma(prices: list[float], period: int) -> float | None:
+    if not prices or len(prices) < period:
+        return None
     window = prices[-period:]
     return sum(window) / len(window)
 
@@ -107,6 +126,8 @@ def macd(prices: list[float]) -> dict:
 
 def bollinger(prices: list[float], period: int = 20) -> dict:
     mid = sma(prices, period)
+    if mid is None:
+        return {"upper": 0, "middle": 0, "lower": 0}
     window = prices[-period:]
     var = sum((p - mid) ** 2 for p in window) / period
     sd = var**0.5
@@ -311,9 +332,9 @@ def main(market: str = "KRW-BTC"):
         "change_rate_24h": ticker["signed_change_rate"],
         "volume_24h": ticker["acc_trade_volume_24h"],
         "indicators": {
-            "sma_20": round(sma(closes, 20), 2),
-            "sma_50": round(sma(closes, 50), 2) if len(closes) >= 50 else None,
-            "sma_200": round(sma(closes, 200), 2) if len(closes) >= 200 else None,
+            "sma_20": round(sma(closes, 20), 2) if sma(closes, 20) is not None else None,
+            "sma_50": round(sma(closes, 50), 2) if sma(closes, 50) is not None else None,
+            "sma_200": round(sma(closes, 200), 2) if sma(closes, 200) is not None else None,
             "ema_10": round(ema(closes, 10), 2),
             "ema_50": round(ema(closes, 50), 2) if len(closes) >= 50 else None,
             "ema_200": round(ema(closes, 200), 2) if len(closes) >= 200 else None,

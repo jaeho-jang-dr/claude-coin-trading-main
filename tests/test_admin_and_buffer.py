@@ -401,13 +401,13 @@ class TestUpdateDbStatus:
 
     def test_no_record_id_skips(self):
         """Without record id, does nothing."""
-        with patch.dict(os.environ, {"SUPABASE_URL": "http://x", "SUPABASE_SERVICE_KEY": "k"}):
+        with patch.dict(os.environ, {"SUPABASE_URL": "http://x", "SUPABASE_SERVICE_ROLE_KEY": "k"}):
             admin_review._update_db_status({}, "promoted")
 
     def test_successful_patch(self):
         """Sends PATCH request with correct parameters."""
         mock_requests = MagicMock()
-        with patch.dict(os.environ, {"SUPABASE_URL": "http://x", "SUPABASE_SERVICE_KEY": "k"}):
+        with patch.dict(os.environ, {"SUPABASE_URL": "http://x", "SUPABASE_SERVICE_ROLE_KEY": "k"}):
             with patch.dict("sys.modules", {"requests": mock_requests}):
                 admin_review._update_db_status({"id": 42}, "promoted")
                 mock_requests.patch.assert_called_once()
@@ -838,7 +838,7 @@ class TestGetSubmissionsFromDb:
         mock_resp.status_code = 200
         mock_resp.json.return_value = [{"trainer_id": "db_user"}]
         mock_requests.get.return_value = mock_resp
-        with patch.dict(os.environ, {"SUPABASE_URL": "http://x", "SUPABASE_SERVICE_KEY": "k"}):
+        with patch.dict(os.environ, {"SUPABASE_URL": "http://x", "SUPABASE_SERVICE_ROLE_KEY": "k"}):
             with patch.dict("sys.modules", {"requests": mock_requests}):
                 result = admin_review.get_submissions_from_db()
         assert len(result) == 1
@@ -848,7 +848,7 @@ class TestGetSubmissionsFromDb:
         """DB request failure falls back to local."""
         mock_requests = MagicMock()
         mock_requests.get.side_effect = Exception("connection error")
-        with patch.dict(os.environ, {"SUPABASE_URL": "http://x", "SUPABASE_SERVICE_KEY": "k"}):
+        with patch.dict(os.environ, {"SUPABASE_URL": "http://x", "SUPABASE_SERVICE_ROLE_KEY": "k"}):
             with patch.dict("sys.modules", {"requests": mock_requests}):
                 with patch.object(admin_review, "get_submissions_local",
                                   return_value=[{"trainer_id": "local"}]) as mock_local:
@@ -862,7 +862,7 @@ class TestGetSubmissionsFromDb:
         mock_resp = MagicMock()
         mock_resp.status_code = 500
         mock_requests.get.return_value = mock_resp
-        with patch.dict(os.environ, {"SUPABASE_URL": "http://x", "SUPABASE_SERVICE_KEY": "k"}):
+        with patch.dict(os.environ, {"SUPABASE_URL": "http://x", "SUPABASE_SERVICE_ROLE_KEY": "k"}):
             with patch.dict("sys.modules", {"requests": mock_requests}):
                 with patch.object(admin_review, "get_submissions_local",
                                   return_value=[]) as mock_local:

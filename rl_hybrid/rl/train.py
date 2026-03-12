@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from rl_hybrid.rl.data_loader import HistoricalDataLoader
 from rl_hybrid.rl.environment import BitcoinTradingEnv
 from rl_hybrid.rl.scenario_generator import ScenarioGenerator
+from rl_hybrid.config import config as system_config
 
 logging.basicConfig(
     level=logging.INFO,
@@ -394,6 +395,127 @@ def evaluate(trader=None, env=None, episodes: int = 10, model_path: str = None):
     return all_stats
 
 
+def train_multi_objective(
+    days: int,
+    total_steps: int,
+    balance: float,
+    interval: str = "4h",
+    algo: str = "ppo",
+    envelope_morl: bool = False,
+    adaptive_weights: bool = True,
+    edge_cases: bool = False,
+    synthetic_ratio: float = 0.3,
+):
+    """다중 목표 RL 훈련
+
+    5가지 목표(profit, risk, efficiency, sharpe, tail_risk)를
+    동시에 최적화하며, Pareto 최적 모델을 발견한다.
+
+    Args:
+        days: 훈련 데이터 기간
+        total_steps: 총 훈련 스텝
+        balance: 초기 잔고
+        interval: 캔들 타임프레임
+        algo: RL 알고리즘
+        envelope_morl: Envelope MORL 모드 (가중치를 관측에 concat)
+        adaptive_weights: 적응적 가중치 조절 사용 여부
+        edge_cases: 엣지 케이스 합성 데이터 혼합
+        synthetic_ratio: 합성 데이터 비율
+    """
+    from rl_hybrid.rl.policy import SB3_AVAILABLE
+
+    if not SB3_AVAILABLE:
+        logger.error("stable-baselines3를 설치하세요: pip install stable-baselines3")
+        return
+
+    from rl_hybrid.rl.multi_objective_reward import (
+        create_training_pipeline,
+        OBJECTIVE_NAMES,
+    )
+
+    mo_config = system_config.multi_objective_rl
+
+    logger.info(f"\n{'='*60}")
+    logger.info("  Multi-Objective RL 훈련 시작")
+    logger.info(f"{'='*60}")
+    logger.info(f"  알고리즘: {algo.upper()}")
+    logger.info(f"  Envelope MORL: {envelope_morl}")
+    logger.info(f"  적응적 가중치: {adaptive_weights}")
+    logger.info(f"  가중치: {mo_config.weights}")
+    logger.info(f"  제약: MDD<{mo_config.max_mdd:.0%}, "
+                f"trades/day<{mo_config.max_trades_per_day:.0f}")
+    logger.info(f"{'='*60}\n")
+
+    TraderClass = get_trader_class(algo)
+
+    if edge_cases:
+        train_candles, eval_candles, train_signals, eval_signals = \
+            prepare_edge_case_data(days, interval, synthetic_ratio)
+    else:
+        train_candles, eval_candles, train_signals, eval_signals = \
+            prepare_data(days, interval)
+
+    # 기본 환경 생성
+    base_train_env = BitcoinTradingEnv(
+        candles=train_candles,
+        initial_balance=balance,
+        external_signals=train_signals,
+    )
+    base_eval_env = BitcoinTradingEnv(
+        candles=eval_candles,
+        initial_balance=balance,
+        external_signals=eval_signals,
+    )
+
+    # 다중 목표 래핑
+    mo_train_env, mo_eval_env, sb3_callback = create_training_pipeline(
+        train_env=base_train_env,
+        eval_env=base_eval_env,
+        weights=mo_config.weights,
+        envelope_morl=envelope_morl,
+        adaptive_weights=adaptive_weights,
+        pareto_max_k=mo_config.pareto_max_k,
+        eval_freq=mo_config.eval_freq,
+    )
+
+    # 훈련
+    trader = TraderClass(env=mo_train_env)
+
+    callbacks = []
+    if sb3_callback is not None:
+        callbacks.append(sb3_callback)
+
+    trader.train(
+        total_timesteps=total_steps,
+        eval_env=mo_eval_env,
+        save_freq=total_steps // 10,
+        callbacks=callbacks if callbacks else None,
+    )
+
+    # 최종 평가
+    logger.info("\n--- Multi-Objective 평가 ---")
+    all_stats = evaluate(trader, mo_eval_env, episodes=10)
+
+    # 목표별 통계 출력
+    logger.info(f"\n{'='*60}")
+    logger.info("  목표별 평균 점수")
+    logger.info(f"{'='*60}")
+    for name in OBJECTIVE_NAMES:
+        scores = [
+            s.get("objective_means", {}).get(name, 0.0) for s in all_stats
+        ]
+        avg = np.mean(scores) if scores else 0.0
+        logger.info(f"  {name:>12}: {avg:+.4f}")
+
+    # 가중치 최종 상태
+    final_stats = mo_eval_env.get_episode_stats()
+    logger.info(f"\n최종 가중치: {final_stats.get('weights', {})}")
+
+    backtest_baseline(days, interval)
+
+    return trader
+
+
 def backtest_baseline(days: int = 180, interval: str = "1h"):
     """Buy & Hold 벤치마크"""
     _, eval_candles, _, _ = prepare_data(days, interval)
@@ -444,11 +566,26 @@ if __name__ == "__main__":
                         help="엣지 케이스 합성 데이터 혼합 훈련")
     parser.add_argument("--synthetic-ratio", type=float, default=0.3,
                         help="합성 데이터 비율 (0.0~1.0, default: 0.3)")
+    parser.add_argument("--multi-objective", action="store_true",
+                        help="다중 목표 RL 훈련 (profit/risk/efficiency/sharpe/tail_risk)")
+    parser.add_argument("--envelope-morl", action="store_true",
+                        help="Envelope MORL 모드 (가중치를 관측에 concat)")
+    parser.add_argument("--no-adaptive-weights", action="store_true",
+                        help="적응적 가중치 조절 비활성화")
 
     args = parser.parse_args()
 
     if args.baseline:
         backtest_baseline(args.days, args.interval)
+    elif args.multi_objective:
+        train_multi_objective(
+            args.days, args.steps, args.balance, args.interval,
+            algo=args.algo if args.algo != "all" else "ppo",
+            envelope_morl=args.envelope_morl,
+            adaptive_weights=not args.no_adaptive_weights,
+            edge_cases=args.edge_cases,
+            synthetic_ratio=args.synthetic_ratio,
+        )
     elif args.eval:
         evaluate(model_path=args.model, episodes=10)
     elif args.algo == "all":

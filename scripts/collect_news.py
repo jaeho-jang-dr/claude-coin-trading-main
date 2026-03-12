@@ -167,19 +167,20 @@ def main():
             f"Tavily 월간 한도 소진: {usage['count']}/{MONTHLY_LIMIT} (잔여 {remaining}건)"
         )
 
-    api_calls = len(queries)
+    api_calls = 0
     is_weekend = datetime.now().weekday() >= 5
 
     all_articles = {}
     for q in queries:
         articles = fetch_news(api_key, q["query"], q["max_results"])
+        api_calls += 1
         for a in articles:
             a["category"] = q["category"]
         for a in articles:
             if a["url"] not in all_articles:
                 all_articles[a["url"]] = a
 
-    # API 호출 수 기준으로 사용량 기록
+    # API 호출 수 기준으로 사용량 기록 (실제 성공한 호출만 카운트)
     usage["count"] += api_calls
     _save_usage(usage)
 

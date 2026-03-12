@@ -29,7 +29,7 @@ logger = logging.getLogger("rl.admin")
 def get_submissions_from_db() -> list[dict]:
     """DB에서 제출 목록 조회"""
     supabase_url = os.environ.get("SUPABASE_URL", "")
-    supabase_key = os.environ.get("SUPABASE_SERVICE_KEY", "")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
     if not supabase_url or not supabase_key:
         return get_submissions_local()
@@ -229,7 +229,7 @@ def promote_model(submission_id: int):
 def _update_db_status(submission: dict, status: str):
     """DB에서 제출 상태 업데이트"""
     supabase_url = os.environ.get("SUPABASE_URL", "")
-    supabase_key = os.environ.get("SUPABASE_SERVICE_KEY", "")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
     record_id = submission.get("id")
 
     if not supabase_url or not supabase_key or not record_id:

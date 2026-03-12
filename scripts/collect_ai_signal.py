@@ -205,8 +205,13 @@ def analyze_whale_trades(market: str) -> dict:
     }
 
 
-def analyze_multi_timeframe(market: str) -> dict:
-    """#3 멀티 타임프레임 다이버전스"""
+def analyze_multi_timeframe(market: str) -> tuple[dict, list[dict]]:
+    """#3 멀티 타임프레임 다이버전스.
+
+    Returns:
+        tuple: (분석 결과 dict, 일봉 원본 데이터 list) — 일봉 데이터를
+               호출자가 재사용할 수 있도록 함께 반환한다.
+    """
     daily = api_get("/candles/days", {"market": market, "count": "30"})
     time.sleep(RATE_LIMIT_WAIT)
     h4 = api_get("/candles/minutes/240", {"market": market, "count": "42"})
@@ -264,7 +269,7 @@ def analyze_multi_timeframe(market: str) -> dict:
     else:
         trend_alignment = "insufficient_data"
 
-    return {
+    result = {
         "timeframes": {
             "daily": {"rsi": rsi_d, "trend_pct": trend_d},
             "4h": {"rsi": rsi_4h, "trend_pct": trend_4h},
@@ -274,6 +279,7 @@ def analyze_multi_timeframe(market: str) -> dict:
         "divergence": divergence,
         "divergence_type": divergence_type,
     }
+    return result, daily
 
 
 def analyze_volatility(daily_candles: list[dict]) -> dict:
@@ -505,11 +511,8 @@ def main(market: str = "KRW-BTC"):
     whale = analyze_whale_trades(market)
     time.sleep(RATE_LIMIT_WAIT)
 
-    multi_tf = analyze_multi_timeframe(market)
-    # multi_timeframe 내부에서 3번 API 호출 + sleep 포함
-
-    # 일봉 데이터 (멀티TF에서 이미 호출했지만 변동성/거래량 분석용으로 재호출)
-    daily = api_get("/candles/days", {"market": market, "count": "30"})
+    multi_tf, daily = analyze_multi_timeframe(market)
+    # multi_timeframe이 일봉 데이터를 함께 반환하므로 재호출 불필요
 
     volatility = analyze_volatility(daily)
     volume = analyze_volume(daily)

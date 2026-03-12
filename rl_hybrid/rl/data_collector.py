@@ -76,7 +76,7 @@ class LiveDataCollector:
                     esl.eth_btc_score
                 FROM decisions d
                 LEFT JOIN external_signal_log esl ON d.external_signal_id = esl.id
-                WHERE d.created_at > NOW() - INTERVAL '%s days'
+                WHERE d.created_at > NOW() - INTERVAL '1 day' * %s
                   AND d.outcome_24h_pct IS NOT NULL
                 ORDER BY d.created_at DESC
                 LIMIT %s
@@ -116,7 +116,7 @@ class LiveDataCollector:
                         ELSE 'neutral'
                     END AS outcome
                 FROM agent_switches
-                WHERE switch_time > NOW() - INTERVAL '%s days'
+                WHERE switch_time > NOW() - INTERVAL '1 day' * %s
                   AND profit_after_24h IS NOT NULL
                 ORDER BY switch_time DESC
             """, (days,))
@@ -148,7 +148,7 @@ class LiveDataCollector:
                     profit_loss_pct,
                     created_at::text
                 FROM portfolio_snapshots
-                WHERE created_at > NOW() - INTERVAL '%s days'
+                WHERE created_at > NOW() - INTERVAL '1 day' * %s
                 ORDER BY created_at ASC
             """, (days,))
 

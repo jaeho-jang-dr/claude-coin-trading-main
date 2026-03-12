@@ -1,4 +1,4 @@
-"""통합 cycle_id 생성 — 모든 DB 기록의 연결 키"""
+"""통합 cycle_id 생성 -- 모든 DB 기록의 연결 키"""
 from datetime import datetime, timezone, timedelta
 
 KST = timezone(timedelta(hours=9))

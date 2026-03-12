@@ -23,7 +23,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from rl_hybrid.config import config
+from rl_hybrid.config import config, SystemConfig
 
 logger = logging.getLogger("rl.continuous_learner")
 
@@ -65,7 +65,12 @@ class ContinuousLearner:
         if not AVAILABLE:
             raise ImportError("PyTorch 및 의존 모듈이 필요합니다")
 
-        self.trainer = trainer or DistributedTrainer(obs_dim=42)
+        # MORL 활성화 시 obs_dim = 42 + 5(weight vector) = 47
+        self._sys_config = SystemConfig()
+        obs_dim = 42
+        if self._sys_config.multi_objective_rl.envelope_morl or self._sys_config.multi_objective_rl.adaptive_weights:
+            obs_dim = 47
+        self.trainer = trainer or DistributedTrainer(obs_dim=obs_dim)
         self.registry = ModelRegistry()
         self.collector = LiveDataCollector()
         self.loader = HistoricalDataLoader()
@@ -122,16 +127,53 @@ class ContinuousLearner:
         logger.info("=== 지속 학습 사이클 시작 ===")
         start = time.time()
 
+        # DB 로깅: 훈련 시작
+        cycle_id = None
+        try:
+            from rl_hybrid.rl.rl_db_logger import log_training_start
+            cycle_id = log_training_start(
+                cycle_type="continuous",
+                algorithm="ppo",
+                module="continuous_learner",
+                training_steps=self.incremental_steps,
+                data_days=self.data_days,
+                obs_dim=self.trainer.model.obs_dim if hasattr(self.trainer.model, 'obs_dim') else 42,
+                morl_enabled=self._sys_config.multi_objective_rl.envelope_morl,
+            )
+        except Exception as e:
+            logger.debug(f"DB 훈련 시작 기록 실패: {e}")
+
+        cfg = SystemConfig()
+
+        # 0. Self-Tuning 롤백 체크
+        if cfg.self_tuning.enabled:
+            try:
+                from rl_hybrid.rl.self_tuning_rl import ParameterTuner
+                tuner = ParameterTuner()
+                tuner.check_rollback(
+                    current_metrics={},
+                    threshold_sharpe_drop=cfg.self_tuning.rollback_sharpe_drop,
+                )
+                logger.debug("Self-tuning 롤백 체크 완료")
+            except Exception as e:
+                logger.debug(f"Self-tuning 롤백 체크: {e}")
+
         # 1. 새 데이터 확인
         stats = self.collector.get_training_stats(days=7)
         if not stats.get("available"):
-            logger.info("학습 데이터 없음 — 스킵")
+            logger.info("학습 데이터 없음 -- 스킵")
             return
 
         new_count = stats["count"]
-        if new_count <= self._last_decision_count and \
-           new_count - self._last_decision_count < self.min_new_decisions:
-            logger.info(f"새 데이터 부족: {new_count - self._last_decision_count}건 — 스킵")
+        if (new_count - self._last_decision_count) < self.min_new_decisions:
+            logger.info(f"새 데이터 부족: {new_count - self._last_decision_count}건 -- 스킵")
+            if cycle_id:
+                try:
+                    from rl_hybrid.rl.rl_db_logger import log_training_complete
+                    log_training_complete(cycle_id=cycle_id, status="skipped",
+                                         error_message="데이터 부족", elapsed_seconds=time.time() - start)
+                except Exception:
+                    pass
             return
 
         # 2. 현재 모델 평가 (베이스라인)
@@ -145,6 +187,13 @@ class ContinuousLearner:
         candles = self._load_fresh_data()
         if not candles:
             logger.warning("최신 캔들 로드 실패")
+            if cycle_id:
+                try:
+                    from rl_hybrid.rl.rl_db_logger import log_training_complete
+                    log_training_complete(cycle_id=cycle_id, status="failed",
+                                         error_message="캔들 데이터 로드 실패", elapsed_seconds=time.time() - start)
+                except Exception:
+                    pass
             return
 
         # 4. 증분 학습
@@ -176,6 +225,7 @@ class ContinuousLearner:
                     "eval_episodes": self.eval_episodes,
                 },
                 training_config={
+                    "algorithm": "ppo",
                     "incremental_steps": self.incremental_steps,
                     "data_days": self.data_days,
                     "live_decisions_used": new_count,
@@ -196,7 +246,38 @@ class ContinuousLearner:
                     logger.info(f"롤백 완료: → {rollback_version}")
 
         self._last_decision_count = new_count
+
+        # Multi-Agent Weight Learner 증분 업데이트
+        if cfg.multi_agent.enabled:
+            try:
+                from rl_hybrid.rl.multi_agent_consensus import MultiAgentTrainer
+                trainer = MultiAgentTrainer(
+                    weight_learner_steps=10_000,
+                )
+                trainer._train_phase2(swing_days=30)
+                logger.info("Weight learner 증분 업데이트 완료")
+            except Exception as e:
+                logger.warning(f"Weight learner 업데이트 스킵: {e}")
+
         elapsed = time.time() - start
+
+        # DB 로깅: 훈련 완료
+        if cycle_id:
+            try:
+                from rl_hybrid.rl.rl_db_logger import log_training_complete
+                log_training_complete(
+                    cycle_id=cycle_id,
+                    avg_return_pct=new_stats.get("avg_return"),
+                    avg_sharpe=new_stats.get("avg_sharpe"),
+                    avg_mdd=new_stats.get("avg_mdd"),
+                    baseline_sharpe=baseline_stats.get("avg_sharpe"),
+                    improved=improved,
+                    elapsed_seconds=elapsed,
+                    status="completed",
+                )
+            except Exception as e:
+                logger.debug(f"DB 훈련 완료 기록 실패: {e}")
+
         logger.info(f"=== 지속 학습 완료: {elapsed:.1f}초 ===")
 
     def _load_fresh_data(self) -> list[dict]:
@@ -213,8 +294,22 @@ class ContinuousLearner:
 
         최신 시장 데이터로 환경을 생성하고,
         n_steps만큼 롤아웃하여 글로벌 모델을 업데이트한다.
+        Multi-Objective RL이 활성화되면 환경을 MORL 래퍼로 감싼다.
         """
         env = BitcoinTradingEnv(candles=candles, initial_balance=10_000_000)
+
+        # Multi-Objective 환경 래핑
+        cfg = self._sys_config
+        if cfg.multi_objective_rl.envelope_morl or cfg.multi_objective_rl.adaptive_weights:
+            try:
+                from rl_hybrid.rl.multi_objective_reward import MultiObjectiveEnv
+                env = MultiObjectiveEnv(
+                    env,
+                    envelope_morl=cfg.multi_objective_rl.envelope_morl,
+                )
+                logger.info("MORL 환경 래퍼 적용")
+            except Exception as e:
+                logger.warning(f"MORL 환경 래핑 실패 (기본 환경 사용): {e}")
         buffer = TrajectoryBuffer(max_size=self.incremental_steps * 2)
 
         obs, info = env.reset()
@@ -282,6 +377,14 @@ class ContinuousLearner:
             env = BitcoinTradingEnv(
                 candles=eval_candles, initial_balance=10_000_000
             )
+            # MORL 환경 래핑 (학습 환경과 동일하게)
+            cfg = self._sys_config
+            if cfg.multi_objective_rl.envelope_morl or cfg.multi_objective_rl.adaptive_weights:
+                try:
+                    from rl_hybrid.rl.multi_objective_reward import MultiObjectiveEnv
+                    env = MultiObjectiveEnv(env, envelope_morl=cfg.multi_objective_rl.envelope_morl)
+                except Exception:
+                    pass
             obs, _ = env.reset(seed=ep)
             done = False
 

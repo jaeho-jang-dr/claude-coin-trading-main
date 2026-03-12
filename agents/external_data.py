@@ -10,7 +10,7 @@
   - collect_macro.py → 매크로 경제 지표 (S&P500, DXY, 금, 유가, 10Y)
   - collect_crypto_signals.py → CoinGecko 거래량 이상 감지 (MCP 연동)
   - calculate_external_signal.py → Data Fusion 종합
-  + NVT Signal (blockchain.com API) — 온체인 가치 평가
+  + NVT Signal (blockchain.com API) -- 온체인 가치 평가
   + 뉴스 감성 분석 (키워드 기반)
   + Supabase: 사용자 피드백, 과거 결정 성과
 
@@ -291,11 +291,11 @@ def load_performance_review() -> dict:
 
     # 성과 평가
     if win_rate >= 60:
-        assessment = "양호 — 최근 판단 정확도 높음"
+        assessment = "양호 -- 최근 판단 정확도 높음"
     elif win_rate >= 40:
-        assessment = "보통 — 승률 균형"
+        assessment = "보통 -- 승률 균형"
     else:
-        assessment = "주의 — 최근 판단 정확도 낮음, 보수적 접근 권장"
+        assessment = "주의 -- 최근 판단 정확도 낮음, 보수적 접근 권장"
 
     return {
         "available": True,
@@ -369,7 +369,7 @@ class ExternalDataAgent:
         # NVT Signal (blockchain.com)
         results["nvt"] = _fetch_nvt_signal()
 
-        # 뉴스 감성 분석 (키워드 기반 — 압축 전 원본으로 수행)
+        # 뉴스 감성 분석 (키워드 기반 -- 압축 전 원본으로 수행)
         news_sentiment = analyze_news_sentiment(results.get("news", {}))
         results["news_sentiment"] = news_sentiment
 
@@ -545,7 +545,7 @@ class ExternalDataAgent:
         bs = results.get("binance_sentiment", {})
         sentiment = bs.get("sentiment_score", {})
         bs_score = sentiment.get("score", 0) if isinstance(sentiment, dict) else 0
-        score -= bs_score
+        score += bs_score
 
         # 고래 활동
         wt = results.get("whale_tracker", {})
@@ -621,7 +621,7 @@ class ExternalDataAgent:
         url = os.getenv("SUPABASE_URL", "")
         key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
         if not url or not key:
-            logging.warning("Supabase 환경변수 미설정 — external_signal_log 저장 건너뜀")
+            logging.warning("Supabase 환경변수 미설정 -- external_signal_log 저장 건너뜀")
             return
 
         sources = results.get("sources", {})

@@ -22,7 +22,7 @@ try:
     SB3_AVAILABLE = True
 except ImportError:
     SB3_AVAILABLE = False
-    logger.warning("stable-baselines3 미설치 — RL 훈련 비활성화")
+    logger.warning("stable-baselines3 미설치 -- RL 훈련 비활성화")
 
 
 # 모델 저장 경로
@@ -118,6 +118,7 @@ class PPOTrader:
         total_timesteps: int = 100_000,
         eval_env=None,
         save_freq: int = 10_000,
+        callbacks: list = None,
     ):
         """모델 훈련
 
@@ -125,10 +126,14 @@ class PPOTrader:
             total_timesteps: 총 훈련 스텝
             eval_env: 평가용 환경 (별도 데이터)
             save_freq: 모델 저장 주기 (스텝)
+            callbacks: 추가 SB3 콜백 리스트
         """
         os.makedirs(MODEL_DIR, exist_ok=True)
 
-        callbacks = [TradingMetricsCallback(log_freq=2000)]
+        cb_list = [TradingMetricsCallback(log_freq=2000)]
+        if callbacks:
+            cb_list.extend(callbacks)
+        callbacks = cb_list
 
         if eval_env:
             eval_callback = EvalCallback(
@@ -248,6 +253,7 @@ class SACTrader:
         total_timesteps: int = 100_000,
         eval_env=None,
         save_freq: int = 10_000,
+        callbacks: list = None,
     ):
         """모델 훈련
 
@@ -255,10 +261,14 @@ class SACTrader:
             total_timesteps: 총 훈련 스텝
             eval_env: 평가용 환경 (별도 데이터)
             save_freq: 모델 저장 주기 (스텝)
+            callbacks: 추가 SB3 콜백 리스트
         """
         os.makedirs(MODEL_DIR, exist_ok=True)
 
-        callbacks = [TradingMetricsCallback(log_freq=2000)]
+        cb_list = [TradingMetricsCallback(log_freq=2000)]
+        if callbacks:
+            cb_list.extend(callbacks)
+        callbacks = cb_list
 
         if eval_env:
             eval_callback = EvalCallback(
@@ -382,6 +392,7 @@ class TD3Trader:
         total_timesteps: int = 100_000,
         eval_env=None,
         save_freq: int = 10_000,
+        callbacks: list = None,
     ):
         """모델 훈련
 
@@ -389,10 +400,14 @@ class TD3Trader:
             total_timesteps: 총 훈련 스텝
             eval_env: 평가용 환경 (별도 데이터)
             save_freq: 모델 저장 주기 (스텝)
+            callbacks: 추가 SB3 콜백 리스트
         """
         os.makedirs(MODEL_DIR, exist_ok=True)
 
-        callbacks = [TradingMetricsCallback(log_freq=2000)]
+        cb_list = [TradingMetricsCallback(log_freq=2000)]
+        if callbacks:
+            cb_list.extend(callbacks)
+        callbacks = cb_list
 
         if eval_env:
             eval_callback = EvalCallback(

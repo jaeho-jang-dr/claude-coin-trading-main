@@ -1,1 +1,1 @@
-"""RL 모듈 — Phase 2에서 구현 (PPO, Gymnasium 환경)"""
+"""RL 모듈 — PPO, Gymnasium 환경, LLM 상태 확장, Self-Tuning"""

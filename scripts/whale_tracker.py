@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-블록체인 고래 추적 (무료 API 전용 — API 키 불필요)
+블록체인 고래 추적 (무료 API 전용 -- API 키 불필요)
 
 데이터 소스: mempool.space (완전 무료, 키 불필요)
 
@@ -30,6 +30,8 @@ if sys.stdout.encoding != "utf-8":
 if sys.stderr.encoding != "utf-8":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import requests
 
 # ── 설정 ──────────────────────────────────────────────
@@ -44,15 +46,28 @@ RATE_LIMIT_WAIT = 1.0  # mempool.space 무료: 제한 완화적이나 예의상 
 WHALE_THRESHOLD_BTC = 10.0
 MEGA_WHALE_BTC = 100.0  # 100 BTC 이상 = 메가 고래
 
+# 커넥션 재사용을 위한 세션
+_session: requests.Session | None = None
+
+
+def _get_session() -> requests.Session:
+    """모듈 레벨 requests.Session을 반환한다 (커넥션 풀 재사용)."""
+    global _session
+    if _session is None:
+        _session = requests.Session()
+        _session.headers.update({"Accept": "application/json"})
+    return _session
+
 
 # ── HTTP 헬퍼 ─────────────────────────────────────────
 
 
 def _get(url: str, label: str = "", parse_json: bool = True):
-    """Exponential backoff 포함 GET 요청."""
+    """Exponential backoff 포함 GET 요청 (Session 재사용)."""
+    session = _get_session()
     for attempt in range(MAX_RETRIES):
         try:
-            resp = requests.get(url, timeout=REQUEST_TIMEOUT)
+            resp = session.get(url, timeout=REQUEST_TIMEOUT)
             if resp.status_code == 200:
                 return resp.json() if parse_json else resp.text.strip()
             if resp.status_code == 429:
@@ -81,6 +96,24 @@ def _get(url: str, label: str = "", parse_json: bool = True):
 # ── 데이터 수집 ───────────────────────────────────────
 
 
+def _fetch_block_hash(height: int) -> tuple[int, str | None]:
+    """블록 해시를 조회한다 (병렬 실행용)."""
+    block_hash = _get(
+        f"{MEMPOOL_API}/block-height/{height}", f"hash_{height}", parse_json=False
+    )
+    if block_hash and isinstance(block_hash, str):
+        return height, block_hash
+    return height, None
+
+
+def _fetch_block_txs(height: int, block_hash: str) -> dict | None:
+    """블록의 트랜잭션을 조회한다 (병렬 실행용)."""
+    txs = _get(f"{MEMPOOL_API}/block/{block_hash}/txs/0", f"txs_{height}")
+    if txs and isinstance(txs, list):
+        return {"height": height, "hash": block_hash, "txs": txs}
+    return None
+
+
 def fetch_recent_blocks(count: int = 3) -> list[dict]:
     """mempool.space에서 최근 N개 블록의 트랜잭션을 조회한다."""
     # 최근 블록 높이
@@ -93,29 +126,42 @@ def fetch_recent_blocks(count: int = 3) -> list[dict]:
         print(f"[whale_tracker] tip_height 파싱 실패: {tip_height}", file=sys.stderr)
         return []
 
+    heights = [tip_height - i for i in range(count)]
+
+    # 1단계: 블록 해시를 병렬 조회
+    hash_map: dict[int, str] = {}
+    with ThreadPoolExecutor(max_workers=count) as executor:
+        futures = {executor.submit(_fetch_block_hash, h): h for h in heights}
+        for future in as_completed(futures):
+            try:
+                height, block_hash = future.result()
+                if block_hash:
+                    hash_map[height] = block_hash
+            except Exception as e:
+                h = futures[future]
+                print(f"[whale_tracker] hash_{h} 실패: {e}", file=sys.stderr)
+
+    if not hash_map:
+        return []
+
+    # 2단계: 블록 트랜잭션을 병렬 조회
     blocks_info = []
-    for i in range(count):
-        height = tip_height - i
-        time.sleep(RATE_LIMIT_WAIT)
+    with ThreadPoolExecutor(max_workers=len(hash_map)) as executor:
+        futures = {
+            executor.submit(_fetch_block_txs, h, bh): h
+            for h, bh in hash_map.items()
+        }
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if result:
+                    blocks_info.append(result)
+            except Exception as e:
+                h = futures[future]
+                print(f"[whale_tracker] txs_{h} 실패: {e}", file=sys.stderr)
 
-        # 블록 해시 조회
-        block_hash = _get(
-            f"{MEMPOOL_API}/block-height/{height}", f"hash_{height}", parse_json=False
-        )
-        if not block_hash or not isinstance(block_hash, str):
-            continue
-
-        time.sleep(RATE_LIMIT_WAIT)
-
-        # 블록의 트랜잭션 목록 (처음 25개)
-        txs = _get(f"{MEMPOOL_API}/block/{block_hash}/txs/0", f"txs_{height}")
-        if txs and isinstance(txs, list):
-            blocks_info.append({
-                "height": height,
-                "hash": block_hash,
-                "txs": txs,
-            })
-
+    # 높이 역순 정렬 (최신 블록 우선)
+    blocks_info.sort(key=lambda b: b["height"], reverse=True)
     return blocks_info
 
 
@@ -287,7 +333,7 @@ def compute_whale_score(block_analysis: dict, mempool_analysis: dict) -> dict:
     # 1) 활동량 기반 (절대값)
     if mega_count >= 3:
         activity_pts = 10
-        reasons.append(f"메가 고래(100+ BTC) {mega_count}건 — 대규모 자금 이동")
+        reasons.append(f"메가 고래(100+ BTC) {mega_count}건 -- 대규모 자금 이동")
     elif mega_count >= 1:
         activity_pts = 5
         reasons.append(f"메가 고래(100+ BTC) {mega_count}건")
@@ -296,7 +342,7 @@ def compute_whale_score(block_analysis: dict, mempool_analysis: dict) -> dict:
         reasons.append(f"고래 거래 {whale_count}건 활발")
     elif whale_count == 0:
         activity_pts = -3
-        reasons.append("고래 활동 미감지 — 안정적 구간")
+        reasons.append("고래 활동 미감지 -- 안정적 구간")
     else:
         activity_pts = 0
 
@@ -323,7 +369,7 @@ def compute_whale_score(block_analysis: dict, mempool_analysis: dict) -> dict:
     # 3) 멤풀 대기
     if pending_count >= 3:
         pending_pts = 2
-        reasons.append(f"멤풀 대형 대기 {pending_count}건 — 추가 변동 예고")
+        reasons.append(f"멤풀 대형 대기 {pending_count}건 -- 추가 변동 예고")
     else:
         pending_pts = 0
 

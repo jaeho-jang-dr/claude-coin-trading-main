@@ -3,12 +3,12 @@
 매크로 경제 지표 수집 (무료 API 전용)
 
 수집 항목:
-  - S&P 500 (^GSPC) — 미국 주식시장 대표 지수
-  - 나스닥 (^IXIC) — 기술주 중심
-  - 달러 인덱스 (DX-Y.NYB) — 달러 강세/약세
-  - 금 (GC=F) — 안전자산 수요
-  - WTI 원유 (CL=F) — 지정학 리스크
-  - 미국 10년 국채 (^TNX) — 금리 방향
+  - S&P 500 (^GSPC) -- 미국 주식시장 대표 지수
+  - 나스닥 (^IXIC) -- 기술주 중심
+  - 달러 인덱스 (DX-Y.NYB) -- 달러 강세/약세
+  - 금 (GC=F) -- 안전자산 수요
+  - WTI 원유 (CL=F) -- 지정학 리스크
+  - 미국 10년 국채 (^TNX) -- 금리 방향
 
 데이터 소스: Yahoo Finance (무료, API 키 불필요)
 출력: JSON (stdout)
@@ -25,6 +25,8 @@ if sys.stdout.encoding != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 if sys.stderr.encoding != "utf-8":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
@@ -46,14 +48,27 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
+# 커넥션 재사용을 위한 세션
+_session: requests.Session | None = None
+
+
+def _get_session() -> requests.Session:
+    """모듈 레벨 requests.Session을 반환한다 (커넥션 풀 재사용)."""
+    global _session
+    if _session is None:
+        _session = requests.Session()
+        _session.headers.update(HEADERS)
+        _session.headers.update({"Accept": "application/json"})
+    return _session
+
 
 def fetch_yahoo(symbol: str, range_: str = "5d", interval: str = "1d") -> dict | None:
-    """Yahoo Finance에서 시세를 조회한다."""
+    """Yahoo Finance에서 시세를 조회한다 (Session 재사용)."""
+    session = _get_session()
     try:
-        resp = requests.get(
+        resp = session.get(
             YAHOO_CHART.format(symbol=symbol),
             params={"range": range_, "interval": interval, "includePrePost": "false"},
-            headers=HEADERS,
             timeout=TIMEOUT,
         )
         if resp.status_code != 200:
@@ -174,13 +189,13 @@ def analyze_macro(quotes: dict) -> dict:
     # 종합 판정
     if score >= 15:
         sentiment = "risk_on"
-        summary = "매크로 환경 강세 — 위험자산 선호"
+        summary = "매크로 환경 강세 -- 위험자산 선호"
     elif score >= 5:
         sentiment = "slightly_bullish"
         summary = "매크로 환경 소폭 우호적"
     elif score <= -15:
         sentiment = "risk_off"
-        summary = "매크로 환경 약세 — 위험자산 회피"
+        summary = "매크로 환경 약세 -- 위험자산 회피"
     elif score <= -5:
         sentiment = "slightly_bearish"
         summary = "매크로 환경 소폭 약세"
@@ -197,19 +212,33 @@ def analyze_macro(quotes: dict) -> dict:
     }
 
 
+def _fetch_and_parse(key: str, info: dict) -> tuple[str, dict]:
+    """개별 심볼 데이터를 수집·파싱한다 (병렬 실행용)."""
+    chart_data = fetch_yahoo(info["symbol"])
+    if chart_data:
+        parsed = parse_quote(chart_data)
+        parsed["name"] = info["name"]
+        parsed["category"] = info["category"]
+        return key, parsed
+    return key, {"error": f"{info['name']} 조회 실패"}
+
+
 def main():
     quotes: dict = {}
 
-    for key, info in SYMBOLS.items():
-        chart_data = fetch_yahoo(info["symbol"])
-        if chart_data:
-            parsed = parse_quote(chart_data)
-            parsed["name"] = info["name"]
-            parsed["category"] = info["category"]
-            quotes[key] = parsed
-        else:
-            quotes[key] = {"error": f"{info['name']} 조회 실패"}
-        time.sleep(0.3)  # 예의상 딜레이
+    # 6개 Yahoo Finance 호출을 병렬로 실행
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = {
+            executor.submit(_fetch_and_parse, key, info): key
+            for key, info in SYMBOLS.items()
+        }
+        for future in as_completed(futures):
+            try:
+                key, parsed = future.result()
+                quotes[key] = parsed
+            except Exception as e:
+                key = futures[future]
+                quotes[key] = {"error": f"조회 실패: {e}"}
 
     analysis = analyze_macro(quotes)
 

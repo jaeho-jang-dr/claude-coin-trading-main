@@ -28,7 +28,7 @@ try:
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
-    logger.warning("PyTorch 미설치 — 분산 RL 훈련 비활성화")
+    logger.warning("PyTorch 미설치 -- 분산 RL 훈련 비활성화")
 
 MODEL_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
@@ -203,7 +203,7 @@ class DistributedTrainer:
         # trajectory 병합
         merged = self._merge_trajectories(trajectories)
         if merged["obs"].shape[0] < self.batch_size:
-            logger.warning("데이터 부족 — 업데이트 스킵")
+            logger.warning("데이터 부족 -- 업데이트 스킵")
             return None
 
         # PPO 업데이트
@@ -387,7 +387,13 @@ class DistributedTrainer:
         path = path or os.path.join(MODEL_DIR, "distributed_ppo_global.pt")
         if os.path.exists(path):
             checkpoint = torch.load(path, weights_only=False)
-            self.model.load_state_dict(checkpoint["model_state_dict"])
+            try:
+                self.model.load_state_dict(checkpoint["model_state_dict"])
+            except RuntimeError as e:
+                if "size mismatch" in str(e):
+                    logger.warning(f"모델 차원 불일치 -- 새 모델로 시작: {e}")
+                    return
+                raise
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             self.update_count = checkpoint.get("update_count", 0)
             self.total_steps_collected = checkpoint.get("total_steps", 0)

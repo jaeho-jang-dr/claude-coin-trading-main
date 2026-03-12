@@ -1,5 +1,5 @@
 """
-Orchestrator — 감독 에이전트
+Orchestrator -- 감독 에이전트
 
 시장 상황을 평가하고, 적절한 전략 에이전트를 선택/교체한다.
 DB에 전환 이력을 저장하고, 과거 성과를 학습하여 판단을 개선한다.
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -35,7 +36,30 @@ AGENTS = {
 }
 
 
+import time as _time
+
+
+def _acquire_lock(lock_path: str, retries: int = 10, wait: float = 0.1):
+    for _ in range(retries):
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return True
+        except FileExistsError:
+            _time.sleep(wait)
+    return False
+
+
+def _release_lock(lock_path: str):
+    try:
+        os.remove(lock_path)
+    except OSError:
+        pass
+
+
 def _load_state() -> dict:
+    lock_path = str(STATE_FILE) + ".lock"
+    _acquire_lock(lock_path)
     try:
         with open(STATE_FILE, encoding="utf-8") as f:
             return json.load(f)
@@ -47,12 +71,19 @@ def _load_state() -> dict:
             "consecutive_losses": 0,
             "switch_history": [],
         }
+    finally:
+        _release_lock(lock_path)
 
 
 def _save_state(state: dict) -> None:
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+    lock_path = str(STATE_FILE) + ".lock"
+    _acquire_lock(lock_path)
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    finally:
+        _release_lock(lock_path)
 
 
 class Orchestrator:
@@ -97,7 +128,7 @@ class Orchestrator:
                 "active_agent": f"🚨 긴급정지",
                 "decision": {
                     "decision": "hold",
-                    "reason": "사용자 EMERGENCY_STOP 활성화 — 모든 매매 차단",
+                    "reason": "사용자 EMERGENCY_STOP 활성화 -- 모든 매매 차단",
                     "confidence": 1.0,
                     "buy_score": {},
                     "trade_params": {},
@@ -118,7 +149,7 @@ class Orchestrator:
             )
             if can_lift:
                 self._deactivate_auto_emergency(
-                    "시장 안정화 확인 — 자동 긴급정지 해제"
+                    "시장 안정화 확인 -- 자동 긴급정지 해제"
                 )
             else:
                 return {
@@ -260,6 +291,14 @@ class Orchestrator:
         rsi = market_data.get("indicators", {}).get("rsi_14", 50)
         price_change_24h = market_data.get("ticker", {}).get("signed_change_rate", 0) * 100
         btc_ratio = portfolio.get("btc_ratio", 0)
+        if btc_ratio == 0:
+            btc_eval = 0
+            for h in portfolio.get("holdings", []):
+                if h.get("currency") == "BTC":
+                    btc_eval = h.get("eval_amount", 0)
+                    break
+            total_eval = portfolio.get("total_eval", 1) or 1
+            btc_ratio = btc_eval / total_eval
         consecutive_losses = self._count_consecutive_losses(past_decisions)
         self.state["consecutive_losses"] = consecutive_losses
 
@@ -492,7 +531,7 @@ class Orchestrator:
         if danger >= 70:
             if current != "conservative":
                 self._switch_reason = (
-                    f"위험도 {danger}점 — 긴급 보수 전환 "
+                    f"위험도 {danger}점 -- 긴급 보수 전환 "
                     f"(FGI {ms['fgi']}, 24h {ms['price_change_24h']:+.1f}%, "
                     f"연속손절 {ms['consecutive_losses']}회)"
                 )
@@ -501,7 +540,7 @@ class Orchestrator:
         # 위험도 45~69 + 현재 공격적 → 보통으로 하향
         if 45 <= danger < 70 and current == "aggressive":
             self._switch_reason = (
-                f"위험도 {danger}점 상승 — 공격적→보통 하향 "
+                f"위험도 {danger}점 상승 -- 공격적→보통 하향 "
                 f"(김치P {ms['kimchi_pct']:.1f}%, 롱숏 {ms['ls_ratio']:.2f})"
             )
             return "moderate"
@@ -509,7 +548,7 @@ class Orchestrator:
         # 위험도 50+ + 현재 보통 → 보수적
         if danger >= 50 and current == "moderate":
             self._switch_reason = (
-                f"위험도 {danger}점 — 보통→보수적 하향 "
+                f"위험도 {danger}점 -- 보통→보수적 하향 "
                 f"(FGI {ms['fgi']}, 연속손절 {ms['consecutive_losses']}회)"
             )
             return "conservative"
@@ -528,7 +567,7 @@ class Orchestrator:
             if opportunity >= 60 and danger < 30:
                 if current != "aggressive":
                     self._switch_reason = (
-                        f"기회 점수 {opportunity}점 — 강한 매수 기회 "
+                        f"기회 점수 {opportunity}점 -- 강한 매수 기회 "
                         f"(FGI {ms['fgi']}, RSI {ms['rsi']:.0f}, "
                         f"Fusion {ms['fusion_signal']}) → 공격적 직행"
                     )
@@ -538,13 +577,13 @@ class Orchestrator:
             if 40 <= opportunity < 60 and danger < 35:
                 if current == "moderate":
                     self._switch_reason = (
-                        f"기회 점수 {opportunity}점 — 매수 기회 증가 "
+                        f"기회 점수 {opportunity}점 -- 매수 기회 증가 "
                         f"(FGI {ms['fgi']}, Fusion {ms['fusion_signal']}) → 공격적"
                     )
                     return "aggressive"
                 elif current == "conservative":
                     self._switch_reason = (
-                        f"기회 점수 {opportunity}점 — 시장 기회 감지 "
+                        f"기회 점수 {opportunity}점 -- 시장 기회 감지 "
                         f"(FGI {ms['fgi']}, RSI {ms['rsi']:.0f}) → 보통"
                     )
                     return "moderate"
@@ -553,7 +592,7 @@ class Orchestrator:
             if 25 <= opportunity < 40 and danger < 30:
                 if current == "conservative":
                     self._switch_reason = (
-                        f"기회 점수 {opportunity}점 — 시장 안정화 "
+                        f"기회 점수 {opportunity}점 -- 시장 안정화 "
                         f"(FGI {ms['fgi']}, RSI {ms['rsi']:.0f}) → 보통 복귀"
                     )
                     return "moderate"
@@ -563,18 +602,22 @@ class Orchestrator:
         # ══════════════════════════════════════════
 
         # 횡보 안정: danger/opportunity 모두 낮으면 보통이 적절
+        # 단, FGI가 실제 중립(36~60)이고 쿨다운이 아닐 때만 전환
         if danger < 25 and opportunity < 25:
-            if ms["phase"] == self.PHASE_NEUTRAL:
+            if ms["phase"] == self.PHASE_NEUTRAL and ms["fgi"] >= 36:
                 if current == "aggressive":
                     self._switch_reason = (
                         f"횡보 중립 (FGI {ms['fgi']}, RSI {ms['rsi']:.0f}) "
-                        f"— 모멘텀 부재 → 보통 하향"
+                        f"-- 모멘텀 부재 -> 보통 하향"
                     )
                     return "moderate"
-                elif current == "conservative" and ms["consecutive_losses"] == 0:
+                elif (current == "conservative"
+                      and ms["consecutive_losses"] == 0
+                      and abs(ms["price_change_24h"]) < 3):
                     self._switch_reason = (
-                        f"횡보 안정 (FGI {ms['fgi']}, 위험도 {danger}점) "
-                        f"— 리스크 해소 → 보통 복귀"
+                        f"횡보 안정 (FGI {ms['fgi']}, 위험도 {danger}점, "
+                        f"24h {ms['price_change_24h']:+.1f}%) "
+                        f"-- 리스크 해소 -> 보통 복귀"
                     )
                     return "moderate"
 
@@ -584,12 +627,20 @@ class Orchestrator:
         """전환 쿨다운 확인. 기본 2시간, 같은 날 3회 이상 전환 시 4시간."""
         from datetime import datetime, timedelta, timezone
 
-        # 당일 전환 횟수 체크
+        kst = timezone(timedelta(hours=9))
+        now = datetime.now(kst)
+        today_str = now.strftime("%Y-%m-%d")
+
+        # 당일 전환 횟수 체크 (KST 기준)
         today_switches = 0
         for sw in self.state.get("switch_history", []):
             try:
                 sw_time = sw.get("timestamp", "")
-                if sw_time[:10] == time.strftime("%Y-%m-%d"):
+                # KST 타임존으로 통일하여 날짜 비교
+                sw_dt = datetime.fromisoformat(sw_time)
+                if sw_dt.tzinfo is None:
+                    sw_dt = sw_dt.replace(tzinfo=kst)
+                if sw_dt.astimezone(kst).strftime("%Y-%m-%d") == today_str:
                     today_switches += 1
             except (ValueError, TypeError):
                 pass
@@ -597,13 +648,21 @@ class Orchestrator:
         # 잦은 전환이면 쿨다운 강화
         cooldown_hours = 2 if today_switches < 3 else 4
 
-        # 마지막 전환 시간 체크
+        # 마지막 전환 시간 체크 (switch_history의 마지막 항목도 검사)
         last_switch = self.state.get("last_switch_time")
+
+        # switch_history에서 더 최근 전환이 있으면 그것을 사용
+        history = self.state.get("switch_history", [])
+        if history:
+            last_in_history = history[-1].get("timestamp", "")
+            if last_in_history and (not last_switch or last_in_history > last_switch):
+                last_switch = last_in_history
+
         if last_switch:
             try:
-                kst = timezone(timedelta(hours=9))
                 switch_dt = datetime.fromisoformat(last_switch)
-                now = datetime.now(kst)
+                if switch_dt.tzinfo is None:
+                    switch_dt = switch_dt.replace(tzinfo=kst)
                 if now - switch_dt < timedelta(hours=cooldown_hours):
                     return True
             except (ValueError, TypeError):
@@ -1008,6 +1067,12 @@ class Orchestrator:
         # ① DCA인데 캐스케이딩 극심 → 매도로 전환
         if decision.decision == "buy" and is_dca and cascade >= 70:
             btc_holding = {}  # 매도 볼륨은 에이전트가 이미 계산했을 수 있음
+            sell_trade_params = {
+                "market": "KRW-BTC",
+                "side": "ask",
+                "volume": None,  # sell all BTC (execute_trade.py handles full-sell)
+                "ord_type": "market",
+            }
             overridden = Dec(
                 decision="sell",
                 confidence=0.85,
@@ -1018,7 +1083,7 @@ class Orchestrator:
                     f"약세지표 {drop_context['external_bearish_count']}개)"
                 ),
                 buy_score=decision.buy_score,
-                trade_params=decision.trade_params,  # 실행 스크립트에서 재처리
+                trade_params=sell_trade_params,
                 external_signal=decision.external_signal,
                 agent_name=f"🎯 감독 오버라이드 ({decision.agent_name})",
             )
@@ -1254,7 +1319,7 @@ class Orchestrator:
             title = "자동 긴급정지 발동" if action == "activate" else "자동 긴급정지 해제"
             subprocess.run(
                 [
-                    "python3", "scripts/notify_telegram.py",
+                    sys.executable, "scripts/notify_telegram.py",
                     "error", f"{emoji} {title}", reason,
                 ],
                 capture_output=True,

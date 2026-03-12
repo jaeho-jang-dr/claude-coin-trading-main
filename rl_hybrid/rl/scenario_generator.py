@@ -380,29 +380,30 @@ class ScenarioGenerator:
         candles = []
         ts = self._timestamps(720)
         price = self.base_price
-        fake_bounces = sorted(self.rng.choice(range(100, 600), size=4, replace=False))
+        fake_bounces = set(self.rng.choice(range(100, 600), size=4, replace=False))
 
-        for i in range(720):
+        i = 0
+        while i < 720:
             if i in fake_bounces:
-                # 가짜 반등 (3~5봉)
                 bounce_len = self.rng.randint(3, 6)
-                for j in range(min(bounce_len, 720 - i)):
+                for j in range(bounce_len):
+                    if i + j >= 720:
+                        break
                     gain = self.rng.uniform(0.002, 0.006)
                     new_price = price * (1 + gain)
-                    candles.append(self._make_candle(ts[min(i + j, 719)], price, new_price,
+                    candles.append(self._make_candle(ts[i + j], price, new_price,
                                                      volume=self.rng.uniform(500, 1200)))
                     price = new_price
+                i += bounce_len
                 continue
-
-            if len(candles) >= 720:
-                break
 
             bleed = self.rng.uniform(0.0005, 0.0015)
             noise = self.rng.uniform(-0.001, 0.001)
             new_price = price * (1 - bleed + noise)
-            vol = self.rng.uniform(150, 400)
-            candles.append(self._make_candle(ts[min(i, 719)], price, new_price, volume=vol))
+            candles.append(self._make_candle(ts[i], price, new_price,
+                                             volume=self.rng.uniform(150, 400)))
             price = new_price
+            i += 1
 
         return candles[:720]
 
@@ -498,24 +499,28 @@ class ScenarioGenerator:
             모든 시나리오 캔들을 이어붙인 리스트
         """
         scenarios = [
-            ("flash_crash", self.flash_crash),
-            ("dead_cat_bounce", self.dead_cat_bounce),
-            ("parabolic_pump", self.parabolic_pump),
-            ("whale_manipulation", self.whale_manipulation),
-            ("sideways_trap", self.sideways_trap),
-            ("cascade_liquidation", self.cascade_liquidation),
-            ("v_shape_recovery", self.v_shape_recovery),
-            ("slow_bleed", self.slow_bleed),
-            ("fomo_top", self.fomo_top),
-            ("black_swan", self.black_swan),
+            self.flash_crash,
+            self.dead_cat_bounce,
+            self.parabolic_pump,
+            self.whale_manipulation,
+            self.sideways_trap,
+            self.cascade_liquidation,
+            self.v_shape_recovery,
+            self.slow_bleed,
+            self.fomo_top,
+            self.black_swan,
         ]
 
-        all_candles = []
+        # Pre-collect all scenario lists, then concatenate once
+        chunks = []
         for var in range(variations):
             self.rng = np.random.RandomState(42 + var * 7)
-            for name, gen_func in scenarios:
-                candles = gen_func()
-                all_candles.extend(candles)
+            for gen_func in scenarios:
+                chunks.append(gen_func())
+
+        # Single list concatenation via itertools.chain (avoids repeated extend)
+        from itertools import chain
+        all_candles = list(chain.from_iterable(chunks))
 
         return all_candles
 
@@ -541,8 +546,17 @@ class ScenarioGenerator:
         target_synthetic_count = int(len(real_candles) * synthetic_ratio / (1 - synthetic_ratio))
 
         if len(synthetic) > target_synthetic_count:
-            # 랜덤 샘플링 (시나리오 단위로)
-            step = max(1, len(synthetic) // target_synthetic_count)
-            synthetic = synthetic[::step][:target_synthetic_count]
+            # Sample contiguous blocks to preserve candle continuity
+            block_size = 96
+            blocks = [synthetic[i:i+block_size] for i in range(0, len(synthetic), block_size)]
+            self.rng.shuffle(blocks)
+            sampled = []
+            for block in blocks:
+                remaining = target_synthetic_count - len(sampled)
+                if remaining <= 0:
+                    break
+                # Allow partial block if it's the first or remaining space
+                sampled.extend(block[:remaining])
+            synthetic = sampled
 
         return real_candles + synthetic

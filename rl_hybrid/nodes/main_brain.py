@@ -49,6 +49,8 @@ class MainBrainNode(BaseNode):
         self.worker_health: dict[str, dict] = {}
         self.pending_requests: dict[str, dict] = {}
 
+        self.request_timeout_ms = 120_000  # 2분 타임아웃
+
         # Phase 3: 분산 RL 트레이너
         self.enable_rl = enable_rl and TORCH_AVAILABLE
         self.trainer: Optional[DistributedTrainer] = None
@@ -229,7 +231,7 @@ class MainBrainNode(BaseNode):
         weights = self.trainer.get_weights_serializable()
         now = time.time()
 
-        for name, info in self.worker_health.items():
+        for name, info in list(self.worker_health.items()):
             if name.startswith("rl_worker") and info["status"] == "alive":
                 msg = ZMQMessage(
                     msg_type=MsgType.RESPONSE.value,
@@ -293,6 +295,7 @@ class MainBrainNode(BaseNode):
         self.pending_requests[msg.request_id] = {
             "action": action.value,
             "time": time.time(),
+            "sent_at": time.time() * 1000,
             "callback": callback,
         }
         return msg.request_id
@@ -313,6 +316,7 @@ class MainBrainNode(BaseNode):
                 return
 
             self.broadcast_market_update(market_data)
+            self._latest_market_data = market_data
 
             # LLM Worker에 분석 요청
             self.send_to_worker(
@@ -346,8 +350,13 @@ class MainBrainNode(BaseNode):
         if self.trainer:
             from rl_hybrid.rl.state_encoder import StateEncoder
             encoder = StateEncoder()
-            # 간이 관측 생성 (실 운영에서는 전체 데이터 사용)
-            obs = np.zeros(encoder.obs_dim, dtype=np.float32)
+            try:
+                if hasattr(self, '_latest_market_data') and self._latest_market_data:
+                    obs = encoder.encode(self._latest_market_data)
+                else:
+                    obs = np.zeros(encoder.obs_dim, dtype=np.float32)
+            except Exception:
+                obs = np.zeros(encoder.obs_dim, dtype=np.float32)
             rl_pred = self.get_rl_prediction(obs)
             if rl_pred:
                 self.logger.info(
@@ -389,6 +398,13 @@ class MainBrainNode(BaseNode):
             if now - info["last_seen"] > timeout and info["status"] == "alive":
                 self.logger.warning(f"워커 타임아웃: {name}")
                 info["status"] = "dead"
+
+        # Clean up timed-out pending requests
+        now_ms = time.time() * 1000
+        stale = [rid for rid, req in self.pending_requests.items()
+                 if now_ms - req.get("sent_at", 0) > self.request_timeout_ms]
+        for rid in stale:
+            del self.pending_requests[rid]
 
     def get_system_status(self) -> dict:
         """전체 시스템 상태 조회"""

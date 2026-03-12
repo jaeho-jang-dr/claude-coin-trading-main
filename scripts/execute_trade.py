@@ -66,7 +66,7 @@ def acquire_lock(timeout=15):
                     print(f"[lock] stale lock 제거 (age={age:.0f}s, pid={lock_pid}, alive={pid_alive})", file=sys.stderr)
                     LOCK_FILE.unlink(missing_ok=True)
                 else:
-                    # Lock is valid and held by a live process — wait or timeout
+                    # Lock is valid and held by a live process -- wait or timeout
                     if time.time() - start_time > timeout:
                         raise TimeoutError(f"락을 획득하지 못했습니다. 다른 매매 프로세스 실행 중 (pid={lock_pid}, age={age:.0f}s)")
                     time.sleep(0.5)
@@ -139,17 +139,20 @@ def make_auth_header(query_string: str) -> dict:
 def execute(side: str, market: str, amount: str):
     ts = time.strftime("%Y-%m-%dT%H:%M:%S+09:00")
 
-    # 1a) 사용자 긴급 정지 확인
+    # 1a) 사용자 긴급 정지 확인 (매도는 청산을 위해 허용)
     if os.environ.get("EMERGENCY_STOP", "false").lower() == "true":
-        return {
-            "success": False,
-            "dry_run": False,
-            "side": side,
-            "market": market,
-            "amount": amount,
-            "error": "사용자 EMERGENCY_STOP 활성화 - 매매 차단",
-            "timestamp": ts,
-        }
+        if side == "bid":
+            return {
+                "success": False,
+                "dry_run": False,
+                "side": side,
+                "market": market,
+                "amount": amount,
+                "error": "EMERGENCY_STOP active - buys blocked",
+                "timestamp": ts,
+            }
+        else:
+            print("⚠️ EMERGENCY_STOP active but allowing sell for position liquidation", file=sys.stderr)
 
     # 1b) 감독 자동 긴급정지 확인 (긴급정지 중 매도는 허용)
     auto_em_file = PROJECT_DIR / "data" / "auto_emergency.json"

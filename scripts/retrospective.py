@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-결정 사후 추적 스크립트 — 매 시간 cron으로 실행
+결정 사후 추적 스크립트 -- 매 시간 cron으로 실행
 
 1h/4h/24h 전 결정들의 가격 변동을 기록하여 결정 정확도를 측정한다.
 
@@ -270,7 +270,7 @@ def update_signal_attempts():
 
 
 def update_buy_score_aftermath():
-    """니어미스/AI거부 사후 추적 — 1h/4h 후 가격을 기록하여 판단 정확도를 측정한다."""
+    """니어미스/AI거부 사후 추적 -- 1h/4h 후 가격을 기록하여 판단 정확도를 측정한다."""
     now = datetime.now(KST)
     current_price = get_btc_price()
     if not current_price:

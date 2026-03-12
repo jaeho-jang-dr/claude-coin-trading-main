@@ -174,7 +174,7 @@ def _update_embedding_via_sql(decision_id: str, embedding: list, embedding_text:
     """
     db_url = os.getenv("SUPABASE_DB_URL")
     if not db_url:
-        print("[save_decision] SUPABASE_DB_URL 미설정 — 임베딩 저장 건너뜀", file=sys.stderr)
+        print("[save_decision] SUPABASE_DB_URL 미설정 -- 임베딩 저장 건너뜀", file=sys.stderr)
         return
 
     import psycopg2

@@ -3,9 +3,9 @@
 AI 단타 트레이딩 봇
 
 3가지 전략을 실시간으로 동시 운영한다:
-  1. 뉴스 반응 단타 (News Reaction) — 뉴스 감성 급변 시 선제 매매
-  2. 급등/급락 리바운드 단타 (Spike Rebound) — 급변동 후 되돌림 포착
-  3. 고래 추종 단타 (Whale Following) — 대량 체결 방향 추종
+  1. 뉴스 반응 단타 (News Reaction) -- 뉴스 감성 급변 시 선제 매매
+  2. 급등/급락 리바운드 단타 (Spike Rebound) -- 급변동 후 되돌림 포착
+  3. 고래 추종 단타 (Whale Following) -- 대량 체결 방향 추종
 
 실행:
   python3 scripts/short_term_trader.py              # 실매매 (.env DRY_RUN 따름)
@@ -208,7 +208,7 @@ def db_insert(table: str, data: dict):
             logging.getLogger("short_term").warning(
                 f"[DB] {table} 삽입 실패 ({resp.status_code}): {resp.text[:200]}"
             )
-        # v4: 로컬 백업 — DB 실패해도 기록 유지
+        # v4: 로컬 백업 -- DB 실패해도 기록 유지
         if table in ("scalp_trades", "scalp_trade_log", "scalp_sessions"):
             _backup_to_local(table, data)
     except Exception as e:
@@ -259,7 +259,7 @@ def check_lock() -> bool:
         lock_time = datetime.fromisoformat(lock_data.get("timestamp", ""))
         # 10분 이상 된 락은 stale로 간주
         if (datetime.now(KST) - lock_time).total_seconds() > 600:
-            log.warning("stale 락파일 발견 — 무시")
+            log.warning("stale 락파일 발견 -- 무시")
             LOCK_FILE.unlink(missing_ok=True)
             return True
         log.warning(f"정규 매매 실행 중: {lock_data.get('process', 'unknown')}")
@@ -267,14 +267,16 @@ def check_lock() -> bool:
     except Exception:
         return True
 
-def acquire_lock(process_name: str):
-    """락파일 생성"""
+def acquire_lock(owner="short_term"):
+    """락파일 생성 (atomic exclusive create)"""
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    LOCK_FILE.write_text(json.dumps({
-        "process": process_name,
-        "pid": os.getpid(),
-        "timestamp": datetime.now(KST).isoformat(),
-    }))
+    try:
+        fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, 'w') as f:
+            json.dump({"owner": owner, "pid": os.getpid(), "time": datetime.now(KST).isoformat()}, f)
+        return True
+    except FileExistsError:
+        return False
 
 def release_lock():
     """락파일 해제"""
@@ -307,7 +309,7 @@ class ShortTermTrader:
         self.daily_pnl = 0.0
         self.used_budget = 0
 
-        # 에러 카운터 — 연속 에러 시 자동 정지
+        # 에러 카운터 -- 연속 에러 시 자동 정지
         self.consecutive_errors = 0
         self.MAX_CONSECUTIVE_ERRORS = 5
         self.emergency_stopped = False
@@ -424,7 +426,7 @@ class ShortTermTrader:
 
         # 필터 5: 하락 추세 + RSI 과매도 접근 시 전체 매수 차단
         if self._market_trend == "downtrend" and self._rsi < 35:
-            return False, f"하락추세 + RSI {self._rsi:.0f} 과매도 접근 — 매수 차단"
+            return False, f"하락추세 + RSI {self._rsi:.0f} 과매도 접근 -- 매수 차단"
 
         return True, "OK"
 
@@ -518,7 +520,7 @@ class ShortTermTrader:
             f"사유: {reason}\n"
             f"보유 포지션: {len(self.positions)}개\n"
             f"오늘 손익: {self.daily_pnl:+,.0f}원\n"
-            f"{'포지션 보유 중 — 수동 확인 필요!' if self.positions else '포지션 없음'}"
+            f"{'포지션 보유 중 -- 수동 확인 필요!' if self.positions else '포지션 없음'}"
         )
         # DRY_RUN이 아니고 포지션이 있으면 긴급 청산 시도
         if not self.dry_run and self.positions:
@@ -616,7 +618,7 @@ class ShortTermTrader:
         "https://rss.app/feeds/v1.1/tSmEpMocyHlHkMnR.xml",  # 코인니스 한국어
     ]
 
-    # 뉴스 감성 키워드 (클래스 레벨 상수 — 매 스캔마다 재생성 방지)
+    # 뉴스 감성 키워드 (클래스 레벨 상수 -- 매 스캔마다 재생성 방지)
     POSITIVE_WORDS = frozenset({
         "surge", "rally", "soar", "breakout", "bull", "pump",
         "approval", "etf approved", "institutional buy", "record high",
@@ -951,7 +953,7 @@ class ShortTermTrader:
             # 손절
             elif pnl_pct <= -pos.stop_loss_pct:
                 exits.append((pos, f"손절 {pnl_pct:.2f}%"))
-            # v4: 조기 손절 — 15분 경과 + -0.2% 이하면 타임아웃 기다리지 않고 청산
+            # v4: 조기 손절 -- 15분 경과 + -0.2% 이하면 타임아웃 기다리지 않고 청산
             elif hold_sec > EARLY_STOP_TIME_MIN * 60 and pnl_pct <= -EARLY_STOP_LOSS_PCT:
                 exits.append((pos, f"조기 손절: {hold_sec/60:.0f}분 경과 + {pnl_pct:+.2f}%"))
             # 시간 제한
@@ -966,6 +968,17 @@ class ShortTermTrader:
         """매매 가능 여부 확인"""
         if os.environ.get("EMERGENCY_STOP", "false").lower() == "true":
             return False, "EMERGENCY_STOP 활성화"
+        # Check auto emergency stop
+        auto_em_file = Path(__file__).resolve().parent.parent / "data" / "auto_emergency.json"
+        if auto_em_file.exists():
+            try:
+                with open(auto_em_file) as f:
+                    em_data = json.load(f)
+                if em_data.get("active", False):
+                    log.warning("자동 긴급정지 활성화 - 매매 차단")
+                    return False, "자동 긴급정지 활성화"
+            except Exception:
+                pass
         if self.daily_trade_count >= SHORT_TERM_MAX_DAILY:
             return False, "daily_limit"
         if self.used_budget >= SHORT_TERM_BUDGET:
@@ -1011,7 +1024,7 @@ class ShortTermTrader:
                                     block_filter=filter_name, block_reason=block_reason)
             return
 
-        # 시그널 통과 — generated 기록
+        # 시그널 통과 -- generated 기록
         self.log_signal_attempt(signal.strategy, "generated", signal=signal)
 
         amount = min(signal.suggested_amount, SHORT_TERM_MAX_TRADE)
@@ -1034,7 +1047,10 @@ class ShortTermTrader:
         else:
             # 정규 매매와 동시 실행 방지
             if not check_lock():
-                log.warning("정규 매매 실행 중 — 매수 보류")
+                log.warning("정규 매매 실행 중 -- 매수 보류")
+                return
+            if not acquire_lock("short_term"):
+                log.warning("락 획득 실패 -- 매수 보류")
                 return
             try:
                 result = upbit_order("bid", MARKET, str(amount))
@@ -1065,6 +1081,8 @@ class ShortTermTrader:
                 if self.consecutive_errors >= self.MAX_CONSECUTIVE_ERRORS:
                     self.emergency_stop(f"연속 예외: {e}")
                 return
+            finally:
+                release_lock()
 
         pos = Position(
             strategy=signal.strategy,
@@ -1116,6 +1134,7 @@ class ShortTermTrader:
         )
 
         if not self.dry_run:
+            acquire_lock("short_term_exit")
             try:
                 result = upbit_order("ask", MARKET, f"{pos.btc_qty:.8f}")
                 if not result["ok"]:
@@ -1139,6 +1158,8 @@ class ShortTermTrader:
                 if self.consecutive_errors >= self.MAX_CONSECUTIVE_ERRORS:
                     self.emergency_stop(f"매도 예외: {e}")
                 return
+            finally:
+                release_lock()
 
         pos.exit_price = exit_price
         pos.exit_time = datetime.now(KST)
@@ -1149,6 +1170,7 @@ class ShortTermTrader:
         self.closed_positions.append(pos)
         self.daily_trade_count += 1
         self.daily_pnl += pnl_krw
+        self.used_budget = max(0, self.used_budget - pos.amount_krw)
         self._last_block_reason.clear()
 
         # v4: 완결된 거래를 scalp_trade_log에 기록
@@ -1368,7 +1390,7 @@ class ShortTermTrader:
 
                 # 3) 가격 급변동 (10분 내 1.5% 이상)
                 if len(self.price_history) >= 60:
-                    # 직접 deque 인덱싱 — 전체 리스트 생성 방지
+                    # 직접 deque 인덱싱 -- 전체 리스트 생성 방지
                     idx = max(0, len(self.price_history) - 600)
                     price_10m_ago = self.price_history[idx]["price"]
                     change_pct = (self.current_price - price_10m_ago) / price_10m_ago * 100
@@ -1585,10 +1607,10 @@ class ShortTermTrader:
             self.print_summary()
 
     def shutdown(self):
-        log.info("종료 신호 수신 — 포지션 정리 중...")
+        log.info("종료 신호 수신 -- 포지션 정리 중...")
         # 보유 포지션 전부 청산
         for pos in list(self.positions):
-            self.execute_exit(pos, "봇 종료 — 강제 청산")
+            self.execute_exit(pos, "봇 종료 -- 강제 청산")
         self.running = False
         # v4: 종료 직전에 세션 요약 DB 기록 (kill -9 방지용 선행 기록)
         try:

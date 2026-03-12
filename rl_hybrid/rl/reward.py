@@ -1,11 +1,13 @@
-"""보상 함수 v8 — Differential Sharpe + PnL + Trading Incentive
+"""보상 함수 v6 — Differential Sharpe + PnL 하이브리드
 
-v6 기반 개선:
-  - Sharpe 스케일 강화 (0.15 → 0.3) — 시그널 크기 증가
-  - 직접 PnL 보상 추가 (거래 결과를 직접 반영)
-  - 거래 빈도 인센티브 — hold-only 정책 붕괴 방지
-  - 비활동 페널티 — 너무 오래 같은 포지션 유지 시 소폭 페널티
-  - MDD 적응형 임계치 — 변동성에 따라 조정
+v1 Sharpe 기반이 가장 학습 가능했음 (explained_variance 0.42, 68 trades, +1.43%)
+v4/v5 순수 PnL은 노이즈가 심해 value function 학습 불가 (explained_variance 0)
+
+v6: v1 구조 유지 + 개선
+  - Sharpe 보상 스케일 강화 (0.1 → 0.15)
+  - 극단 포지션 페널티 제거 (확신 있는 거래 허용)
+  - 거래 비용 이중 차감 제거 (환경에서만 적용)
+  - 수익 실현 보너스 추가 (이익 거래 장려)
 """
 
 import numpy as np
@@ -17,28 +19,32 @@ TRANSACTION_COST = UPBIT_FEE_RATE + SLIPPAGE_RATE
 
 
 class RewardCalculator:
-    """Differential Sharpe + PnL + Trading Incentive 보상"""
+    """Differential Sharpe + PnL 하이브리드 보상"""
 
     def __init__(
         self,
         window_size: int = 20,
-        risk_free_rate: float = 0.18 / 365 / 24,  # 연 18% 목표
+        risk_free_rate: float = 0.03 / 365 / 24,  # 연 3% (현실적 목표)
         max_drawdown_penalty: float = 2.0,
+        overtrade_penalty: float = 0.05,  # 과매매 페널티
     ):
         self.window_size = window_size
         self.risk_free_rate = risk_free_rate
         self.max_drawdown_penalty = max_drawdown_penalty
+        self.overtrade_penalty = overtrade_penalty
 
         self.returns_history: deque[float] = deque(maxlen=window_size)
         self.peak_value = 0.0
+        self.max_drawdown = 0.0
         self.total_trades = 0
-        self.steps_since_trade = 0  # 마지막 거래 후 경과 스텝
+        self.steps_since_last_trade = 0
 
     def reset(self, initial_value: float):
         self.returns_history.clear()
         self.peak_value = initial_value
+        self.max_drawdown = 0.0
         self.total_trades = 0
-        self.steps_since_trade = 0
+        self.steps_since_last_trade = 0
 
     def calculate(
         self,
@@ -52,85 +58,80 @@ class RewardCalculator:
         raw_return = (curr_portfolio_value - prev_portfolio_value) / prev_portfolio_value
         self.returns_history.append(raw_return)
 
-        # 2. Differential Sharpe 보상 (스케일 강화)
+        # 2. Differential Sharpe 보상 (윈도우 기반)
         sharpe_reward = self._compute_sharpe_reward(raw_return)
 
-        # 3. 직접 PnL 보상 (거래 결과 직접 반영, 스케일 적절히)
-        pnl_reward = float(np.clip(raw_return * 50, -1.0, 1.0))
-
-        # 4. 적응형 MDD 페널티
+        # 3. MDD 페널티 (5% 초과 시)
         self.peak_value = max(self.peak_value, curr_portfolio_value)
         drawdown = (self.peak_value - curr_portfolio_value) / self.peak_value
+        self.max_drawdown = max(self.max_drawdown, drawdown)
+        mdd_penalty = -drawdown * self.max_drawdown_penalty if drawdown > 0.05 else 0
 
-        # 변동성 기반 적응형 임계치
-        if len(self.returns_history) >= 5:
-            volatility = np.std(list(self.returns_history))
-            dd_threshold = max(0.03, min(0.10, volatility * 10))
-        else:
-            dd_threshold = 0.05
-
-        mdd_penalty = -drawdown * self.max_drawdown_penalty if drawdown > dd_threshold else 0
-
-        # 5. 거래 인센티브 — 포지션 변경 시
+        # 4. 수익 실현 보너스 — 포지션 변경 후 이익이면 보상
         action_change = abs(action - prev_action)
         profit_bonus = 0.0
-        trade_incentive = 0.0
+        trade_penalty = 0.0
+        self.steps_since_last_trade += 1
 
         if action_change > 0.05:
             self.total_trades += 1
-            self.steps_since_trade = 0
-            # 수익 거래 보너스
-            if raw_return > 0.001:
-                profit_bonus = 0.15
-            # 거래 자체에 소폭 보상 (정책 붕괴 방지)
-            trade_incentive = 0.02
-        else:
-            self.steps_since_trade += 1
+            if raw_return > 0.001:  # 0.1% 이상 수익
+                profit_bonus = 0.1
 
-        # 6. 비활동 페널티 — 48스텝(48시간) 이상 같은 포지션 유지 시
-        inactivity_penalty = 0.0
-        if self.steps_since_trade > 48:
-            inactivity_penalty = -0.01 * min(self.steps_since_trade - 48, 24) / 24
+            # 과매매 페널티: 최근 거래 후 4스텝 이내 재거래 시 페널티
+            if self.steps_since_last_trade < 4:
+                trade_penalty = -self.overtrade_penalty
+            self.steps_since_last_trade = 0
 
-        # 종합: Sharpe(40%) + PnL(30%) + 나머지
-        total_reward = (
-            sharpe_reward * 0.4
-            + pnl_reward * 0.3
-            + mdd_penalty
-            + profit_bonus
-            + trade_incentive
-            + inactivity_penalty
-        )
+        # 종합
+        total_reward = sharpe_reward + mdd_penalty + profit_bonus + trade_penalty
 
         return {
-            "reward": float(np.clip(total_reward, -2.0, 2.0)),
+            "reward": float(total_reward),
             "components": {
                 "raw_return": float(raw_return),
                 "sharpe_reward": float(sharpe_reward),
-                "pnl_reward": float(pnl_reward),
                 "mdd_penalty": float(mdd_penalty),
                 "profit_bonus": float(profit_bonus),
-                "trade_incentive": float(trade_incentive),
-                "inactivity_penalty": float(inactivity_penalty),
                 "drawdown": float(drawdown),
+                "trade_penalty": float(trade_penalty),
                 "total_trades": self.total_trades,
             },
         }
 
     def _compute_sharpe_reward(self, latest_return: float) -> float:
-        """Differential Sharpe Ratio (스케일 강화)"""
-        if len(self.returns_history) < 3:
-            return latest_return * 15  # 초기: 단순 스케일링
+        """Differential Sharpe Ratio
 
-        returns = np.array(self.returns_history)
-        mean_return = returns.mean()
-        std_return = returns.std()
+        윈도우 내 평균/분산 기반 증분 샤프.
+        초기 3스텝: 수익률 직접 스케일링 (안정적 학습 시작)
+
+        Optimized: incremental sum/sum_sq tracking avoids
+        np.array() conversion from deque every step.
+        """
+        n = len(self.returns_history)
+        if n < 3:
+            return latest_return * 10  # 초기: 단순 스케일링
+
+        # Compute mean and std from running sum/sum_sq
+        # (deque is small — window_size=20 — so sum() is fast)
+        total = sum(self.returns_history)
+        total_sq = sum(r * r for r in self.returns_history)
+        mean_return = total / n
+        variance = total_sq / n - mean_return * mean_return
+        # Clamp tiny negatives from floating point
+        std_return = variance ** 0.5 if variance > 0 else 0.0
 
         if std_return < 1e-8:
-            return mean_return * 15
+            return mean_return * 10
 
         sharpe = (mean_return - self.risk_free_rate) / std_return
-        return float(np.clip(sharpe * 0.3, -2.0, 2.0))
+        scaled = sharpe * 0.15
+        # Inline clip instead of np.clip for scalar
+        if scaled > 1.5:
+            return 1.5
+        if scaled < -1.5:
+            return -1.5
+        return float(scaled)
 
     def get_episode_stats(self, final_value: float, initial_value: float) -> dict:
         total_return = (final_value - initial_value) / initial_value
@@ -141,7 +142,7 @@ class RewardCalculator:
             "total_trades": self.total_trades,
             "avg_return": float(returns.mean()) if len(returns) > 0 else 0,
             "std_return": float(returns.std()) if len(returns) > 1 else 0,
-            "max_drawdown": float((self.peak_value - final_value) / self.peak_value),
+            "max_drawdown": float(max(self.max_drawdown, (self.peak_value - final_value) / self.peak_value if self.peak_value > 0 else 0)),
             "sharpe_ratio": float(
                 (returns.mean() - self.risk_free_rate) / returns.std()
                 if len(returns) > 1 and returns.std() > 1e-8

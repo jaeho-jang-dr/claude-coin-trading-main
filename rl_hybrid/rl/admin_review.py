@@ -29,7 +29,7 @@ logger = logging.getLogger("rl.admin")
 def get_submissions_from_db() -> list[dict]:
     """DB에서 제출 목록 조회"""
     supabase_url = os.environ.get("SUPABASE_URL", "")
-    supabase_key = os.environ.get("SUPABASE_SERVICE_KEY", "")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
     if not supabase_url or not supabase_key:
         return get_submissions_local()
@@ -157,7 +157,7 @@ def promote_model(submission_id: int):
     algo = target.get("algorithm", "ppo")
     ret = target.get("avg_return_pct", 0)
 
-    logger.info(f"승격 대상: #{submission_id} {trainer_id} ({algo}) — {ret:.2f}%")
+    logger.info(f"승격 대상: #{submission_id} {trainer_id} ({algo}) -- {ret:.2f}%")
 
     # 모델 파일 찾기
     submissions_dir = os.path.join(MODEL_DIR, "submissions")
@@ -171,57 +171,65 @@ def promote_model(submission_id: int):
                 if os.path.exists(result_path) and os.path.exists(model_path):
                     with open(result_path) as f:
                         local_result = json.load(f)
-                    if abs(local_result.get("avg_return_pct", -999) - ret) < 0.01:
-                        # best에 복사
-                        best_dir = os.path.join(MODEL_DIR, "best")
-                        os.makedirs(best_dir, exist_ok=True)
+                    # Match by model_hash (exact) or avg_return_pct (fallback)
+                    target_hash = target.get("model_hash", "")
+                    matched = False
+                    if target_hash and local_result.get("model_hash") == target_hash:
+                        matched = True  # exact hash match
+                    elif abs(local_result.get("avg_return_pct", -999) - ret) < 0.01:
+                        matched = True  # fallback float comparison
+                    if not matched:
+                        continue
+                    # best에 복사
+                    best_dir = os.path.join(MODEL_DIR, "best")
+                    os.makedirs(best_dir, exist_ok=True)
 
-                        # 기존 best 백업
-                        backup_dir = os.path.join(
-                            MODEL_DIR, "best_backup",
-                            datetime.now().strftime("%Y%m%d_%H%M%S"),
-                        )
-                        if os.path.exists(os.path.join(best_dir, "best_model.zip")):
-                            os.makedirs(backup_dir, exist_ok=True)
-                            for f_name in os.listdir(best_dir):
-                                shutil.copy2(
-                                    os.path.join(best_dir, f_name),
-                                    os.path.join(backup_dir, f_name),
-                                )
-                            logger.info(f"기존 best 백업: {backup_dir}")
+                    # 기존 best 백업
+                    backup_dir = os.path.join(
+                        MODEL_DIR, "best_backup",
+                        datetime.now().strftime("%Y%m%d_%H%M%S"),
+                    )
+                    if os.path.exists(os.path.join(best_dir, "best_model.zip")):
+                        os.makedirs(backup_dir, exist_ok=True)
+                        for f_name in os.listdir(best_dir):
+                            shutil.copy2(
+                                os.path.join(best_dir, f_name),
+                                os.path.join(backup_dir, f_name),
+                            )
+                        logger.info(f"기존 best 백업: {backup_dir}")
 
-                        # 새 모델 승격
-                        shutil.copy2(model_path, os.path.join(best_dir, "best_model.zip"))
-                        model_info = {
-                            "algorithm": algo,
-                            "observation_dim": 42,
-                            "avg_return_pct": ret,
-                            "avg_sharpe": target.get("avg_sharpe"),
-                            "avg_mdd": target.get("avg_mdd"),
-                            "promoted_from": trainer_id,
-                            "promoted_at": datetime.now().isoformat(),
-                        }
-                        with open(os.path.join(best_dir, "model_info.json"), "w") as f:
-                            json.dump(model_info, f, indent=2)
+                    # 새 모델 승격
+                    shutil.copy2(model_path, os.path.join(best_dir, "best_model.zip"))
+                    model_info = {
+                        "algorithm": algo,
+                        "observation_dim": 42,
+                        "avg_return_pct": ret,
+                        "avg_sharpe": target.get("avg_sharpe"),
+                        "avg_mdd": target.get("avg_mdd"),
+                        "promoted_from": trainer_id,
+                        "promoted_at": datetime.now().isoformat(),
+                    }
+                    with open(os.path.join(best_dir, "model_info.json"), "w") as f:
+                        json.dump(model_info, f, indent=2)
 
-                        model_found = True
-                        logger.info(f"승격 완료! 새 best: {ret:.2f}% by {trainer_id}")
-                        break
+                    model_found = True
+                    logger.info(f"승격 완료! 새 best: {ret:.2f}% by {trainer_id}")
+                    break
 
-    if not model_found:
+    if model_found:
+        _update_db_status(target, "promoted")
+    else:
         logger.error(
             "모델 파일을 찾을 수 없습니다. "
             "해당 Trainer의 data/rl_models/submissions/ 디렉토리를 확인하세요."
         )
-
-    # DB 상태 업데이트
-    _update_db_status(target, "promoted")
+        _update_db_status(target, "rejected")
 
 
 def _update_db_status(submission: dict, status: str):
     """DB에서 제출 상태 업데이트"""
     supabase_url = os.environ.get("SUPABASE_URL", "")
-    supabase_key = os.environ.get("SUPABASE_SERVICE_KEY", "")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
     record_id = submission.get("id")
 
     if not supabase_url or not supabase_key or not record_id:

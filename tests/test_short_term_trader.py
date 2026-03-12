@@ -138,23 +138,23 @@ class TestConfiguration:
         assert COMMISSION_PCT == 0.05
 
     def test_min_profit_after_fee(self):
-        # round-trip fee (0.05*2) + 0.1 margin = 0.2
-        assert MIN_PROFIT_AFTER_FEE == pytest.approx(0.2)
+        # round-trip fee (0.05*2) + 0.05 margin = 0.15
+        assert MIN_PROFIT_AFTER_FEE == pytest.approx(0.15)
 
     def test_spike_threshold(self):
-        assert SPIKE_THRESHOLD_PCT == 0.8
+        assert SPIKE_THRESHOLD_PCT == 0.5
 
     def test_spike_window_sec(self):
         assert SPIKE_WINDOW_SEC == 300
 
     def test_whale_threshold_krw(self):
-        assert WHALE_THRESHOLD_KRW == 30_000_000
+        assert WHALE_THRESHOLD_KRW == 20_000_000
 
     def test_whale_ratio_threshold(self):
-        assert WHALE_RATIO_THRESHOLD == 0.7
+        assert WHALE_RATIO_THRESHOLD == 0.6
 
     def test_sell_pressure_block_ratio(self):
-        assert SELL_PRESSURE_BLOCK_RATIO == 3.0
+        assert SELL_PRESSURE_BLOCK_RATIO == 4.0
 
 
 # ===========================================================================
@@ -505,9 +505,9 @@ class TestSellPressureBlocking:
     def test_high_sell_ratio_blocks(self):
         trader = _make_trader()
         now = time.time()
-        # sell 3x buy => blocks
-        trader.whale_recent.append({"side": "BID", "krw": 30_000_000, "time": now})
-        trader.whale_recent.append({"side": "ASK", "krw": 100_000_000, "time": now})
+        # sell 4x+ buy => blocks (SELL_PRESSURE_BLOCK_RATIO = 4.0)
+        trader.whale_recent.append({"side": "BID", "krw": 25_000_000, "time": now})
+        trader.whale_recent.append({"side": "ASK", "krw": 120_000_000, "time": now})
         assert trader.is_sell_pressure_blocking() is True
 
     def test_balanced_does_not_block(self):
@@ -642,7 +642,7 @@ class TestLockFile:
         acquire_lock("test_bot")
         assert fake_lock.exists()
         data = json.loads(fake_lock.read_text())
-        assert data["process"] == "test_bot"
+        assert data["owner"] == "test_bot"
         assert data["pid"] == os.getpid()
 
         release_lock()
@@ -1421,7 +1421,7 @@ class TestLockFileEdgeCases:
         acquire_lock("test_process")
         assert fake_lock.exists()
         data = json.loads(fake_lock.read_text())
-        assert data["process"] == "test_process"
+        assert data["owner"] == "test_process"
 
     def test_release_lock_no_file(self, tmp_path, monkeypatch):
         """release_lock on non-existent file should not raise."""

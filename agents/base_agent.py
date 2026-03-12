@@ -230,7 +230,7 @@ class BaseStrategyAgent(ABC):
                 "type": "rsi_overbought",
             }
 
-        # 강제 손절 — 어떤 상황에서도 무조건 매도
+        # 강제 손절 -- 어떤 상황에서도 무조건 매도
         if profit_pct <= self.forced_stop_loss_pct:
             return {
                 "action": "sell",

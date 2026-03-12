@@ -88,7 +88,8 @@ def evaluate_on_real_data(model_path: str, algo: str, days: int = 180,
     )
 
     TraderClass = get_trader_class(algo)
-    trader = TraderClass(env=env, model_path=model_path)
+    load_path = model_path.removesuffix(".zip")  # SB3 adds .zip internally
+    trader = TraderClass(env=env, model_path=load_path)
     stats = evaluate(trader, env, episodes=episodes)
 
     return {
@@ -102,10 +103,10 @@ def evaluate_on_real_data(model_path: str, algo: str, days: int = 180,
 def submit_to_db(result: dict) -> bool:
     """훈련 결과를 Supabase DB에 업로드"""
     supabase_url = os.environ.get("SUPABASE_URL", "")
-    supabase_key = os.environ.get("SUPABASE_SERVICE_KEY", "")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
     if not supabase_url or not supabase_key:
-        logger.warning("SUPABASE_URL/SUPABASE_SERVICE_KEY 미설정 — 로컬 JSON으로 저장")
+        logger.warning("SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY 미설정 -- 로컬 JSON으로 저장")
         return save_local(result)
 
     try:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-바이낸스 파생상품 심리 지표 + 김치 프리미엄 (무료 API — 키 불필요)
+바이낸스 파생상품 심리 지표 + 김치 프리미엄 (무료 API -- 키 불필요)
 
 수집 항목:
   1. 롱/숏 비율 (Top Trader Long/Short Position Ratio)
@@ -28,6 +28,8 @@ if sys.stdout.encoding != "utf-8":
 if sys.stderr.encoding != "utf-8":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import requests
 
 # ── 설정 ──────────────────────────────────────────────
@@ -40,15 +42,28 @@ REQUEST_TIMEOUT = 15
 MAX_RETRIES = 3
 RATE_LIMIT_WAIT = 0.2
 
+# 커넥션 재사용을 위한 세션
+_session: requests.Session | None = None
+
+
+def _get_session() -> requests.Session:
+    """모듈 레벨 requests.Session을 반환한다 (커넥션 풀 재사용)."""
+    global _session
+    if _session is None:
+        _session = requests.Session()
+        _session.headers.update({"Accept": "application/json"})
+    return _session
+
 
 # ── HTTP 헬퍼 ─────────────────────────────────────────
 
 
 def _get(url: str, params: dict | None = None, label: str = "") -> dict | list | None:
-    """Exponential backoff 포함 GET 요청."""
+    """Exponential backoff 포함 GET 요청 (Session 재사용)."""
+    session = _get_session()
     for attempt in range(MAX_RETRIES):
         try:
-            resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            resp = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
             if resp.status_code == 200:
                 return resp.json()
             if resp.status_code == 429:
@@ -269,13 +284,13 @@ def fetch_kimchi_premium() -> dict:
 
     # 김치 프리미엄 시그널
     if premium_pct > 5.0:
-        signal = "extreme_fomo"  # 국내 과열 — 조정 경고
+        signal = "extreme_fomo"  # 국내 과열 -- 조정 경고
     elif premium_pct > 3.0:
         signal = "high_premium"
     elif premium_pct > 1.0:
         signal = "moderate_premium"
     elif premium_pct < -1.0:
-        signal = "discount"  # 국내 할인 — 매수 기회 가능
+        signal = "discount"  # 국내 할인 -- 매수 기회 가능
     elif premium_pct < -3.0:
         signal = "deep_discount"
     else:
@@ -315,7 +330,7 @@ def compute_sentiment_score(
         if lr > 1.5:
             pts = 10
             components.append({"name": "long_short_ratio", "score": pts,
-                               "detail": f"롱 과밀 ({lr:.2f}) — 조정 경고"})
+                               "detail": f"롱 과밀 ({lr:.2f}) -- 조정 경고"})
         elif lr > 1.2:
             pts = 5
             components.append({"name": "long_short_ratio", "score": pts,
@@ -323,7 +338,7 @@ def compute_sentiment_score(
         elif lr < 0.7:
             pts = -10
             components.append({"name": "long_short_ratio", "score": pts,
-                               "detail": f"숏 과밀 ({lr:.2f}) — 반등 가능"})
+                               "detail": f"숏 과밀 ({lr:.2f}) -- 반등 가능"})
         elif lr < 0.85:
             pts = -5
             components.append({"name": "long_short_ratio", "score": pts,
@@ -338,7 +353,7 @@ def compute_sentiment_score(
         if rate > 0.001:
             pts = 10
             components.append({"name": "funding_rate", "score": pts,
-                               "detail": f"극단적 양수 펀딩 ({rate*100:.3f}%) — 롱 과열"})
+                               "detail": f"극단적 양수 펀딩 ({rate*100:.3f}%) -- 롱 과열"})
         elif rate > 0.0005:
             pts = 5
             components.append({"name": "funding_rate", "score": pts,
@@ -346,7 +361,7 @@ def compute_sentiment_score(
         elif rate < -0.001:
             pts = -10
             components.append({"name": "funding_rate", "score": pts,
-                               "detail": f"극단적 음수 펀딩 ({rate*100:.3f}%) — 숏 과열"})
+                               "detail": f"극단적 음수 펀딩 ({rate*100:.3f}%) -- 숏 과열"})
         elif rate < -0.0005:
             pts = -5
             components.append({"name": "funding_rate", "score": pts,
@@ -361,7 +376,7 @@ def compute_sentiment_score(
         if p > 5.0:
             pts = 10
             components.append({"name": "kimchi_premium", "score": pts,
-                               "detail": f"극단 프리미엄 ({p:.1f}%) — 국내 FOMO"})
+                               "detail": f"극단 프리미엄 ({p:.1f}%) -- 국내 FOMO"})
         elif p > 3.0:
             pts = 5
             components.append({"name": "kimchi_premium", "score": pts,
@@ -369,7 +384,7 @@ def compute_sentiment_score(
         elif p < -3.0:
             pts = -10
             components.append({"name": "kimchi_premium", "score": pts,
-                               "detail": f"깊은 디스카운트 ({p:.1f}%) — 매수 기회"})
+                               "detail": f"깊은 디스카운트 ({p:.1f}%) -- 매수 기회"})
         elif p < -1.0:
             pts = -5
             components.append({"name": "kimchi_premium", "score": pts,
@@ -405,19 +420,29 @@ def compute_sentiment_score(
 
 
 def main() -> None:
-    top_ls = fetch_top_long_short_ratio()
-    time.sleep(RATE_LIMIT_WAIT)
+    # 독립적인 API 호출을 병렬로 실행하여 지연 시간 절감
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {
+            executor.submit(fetch_top_long_short_ratio): "top_ls",
+            executor.submit(fetch_global_long_short_ratio): "global_ls",
+            executor.submit(fetch_funding_rate): "funding",
+            executor.submit(fetch_open_interest): "oi",
+            executor.submit(fetch_kimchi_premium): "kimchi",
+        }
+        results = {}
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                results[key] = future.result()
+            except Exception as e:
+                print(f"[binance_sentiment] {key} 실패: {e}", file=sys.stderr)
+                results[key] = {"error": str(e)}
 
-    global_ls = fetch_global_long_short_ratio()
-    time.sleep(RATE_LIMIT_WAIT)
-
-    funding = fetch_funding_rate()
-    time.sleep(RATE_LIMIT_WAIT)
-
-    oi = fetch_open_interest()
-    time.sleep(RATE_LIMIT_WAIT)
-
-    kimchi = fetch_kimchi_premium()
+    top_ls = results["top_ls"]
+    global_ls = results["global_ls"]
+    funding = results["funding"]
+    oi = results["oi"]
+    kimchi = results["kimchi"]
 
     sentiment = compute_sentiment_score(top_ls, funding, oi, kimchi)
 

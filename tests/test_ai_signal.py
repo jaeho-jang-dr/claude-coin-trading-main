@@ -267,7 +267,7 @@ class TestAnalyzeMultiTimeframe:
         h1 = make_candles_descending([110, 108, 106, 104, 102, 100] + [98] * 18)
 
         mock_api.side_effect = [daily, h4, h1]
-        result = analyze_multi_timeframe("KRW-BTC")
+        result, _daily = analyze_multi_timeframe("KRW-BTC")
         assert result["trend_alignment"] == "all_bullish"
 
     @patch("collect_ai_signal.api_get")
@@ -281,7 +281,7 @@ class TestAnalyzeMultiTimeframe:
         h1 = make_candles_descending([90, 92, 94, 96, 98, 100] + [102] * 18)
 
         mock_api.side_effect = [daily, h4, h1]
-        result = analyze_multi_timeframe("KRW-BTC")
+        result, _daily = analyze_multi_timeframe("KRW-BTC")
         assert result["trend_alignment"] == "all_bearish"
 
     @patch("collect_ai_signal.api_get")
@@ -296,7 +296,7 @@ class TestAnalyzeMultiTimeframe:
         h1 = make_candles_descending([110, 108, 106, 104, 102, 100] + [98] * 18)
 
         mock_api.side_effect = [daily, h4, h1]
-        result = analyze_multi_timeframe("KRW-BTC")
+        result, _daily = analyze_multi_timeframe("KRW-BTC")
         assert result["trend_alignment"] in ("mostly_bullish", "mostly_bearish", "mixed")
 
     @patch("collect_ai_signal.api_get")
@@ -318,7 +318,7 @@ class TestAnalyzeMultiTimeframe:
         h1 = [make_candle(p) for p in reversed(h1_prices)]
 
         mock_api.side_effect = [daily, h4, h1]
-        result = analyze_multi_timeframe("KRW-BTC")
+        result, _daily = analyze_multi_timeframe("KRW-BTC")
         if result["divergence_type"] is not None:
             assert result["divergence_type"] in (
                 "short_term_oversold", "short_term_overbought"

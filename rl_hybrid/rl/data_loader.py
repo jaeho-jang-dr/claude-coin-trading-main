@@ -151,6 +151,9 @@ class HistoricalDataLoader:
         change_rates = np.zeros(n)
         change_rates[1:] = (closes[1:] - closes[:-1]) / closes[:-1]
 
+        # Volume SMA (한 번만 계산)
+        volume_sma20 = self._sma(volumes, 20)
+
         # 결과에 추가
         enriched = []
         for i in range(n):
@@ -174,7 +177,7 @@ class HistoricalDataLoader:
                 "adx_plus_di": float(plus_di[i]),
                 "adx_minus_di": float(minus_di[i]),
                 "change_rate": float(change_rates[i]),
-                "volume_sma20": float(self._sma(volumes, 20)[i]),
+                "volume_sma20": float(volume_sma20[i]),
             })
             enriched.append(c)
 
@@ -206,15 +209,29 @@ class HistoricalDataLoader:
 
     @staticmethod
     def _rolling_std(data: np.ndarray, period: int) -> np.ndarray:
+        n = len(data)
         result = np.full_like(data, np.nan)
-        for i in range(period - 1, len(data)):
-            result[i] = data[i - period + 1:i + 1].std()
-        for i in range(period - 1):
-            result[i] = data[:i + 1].std() if i > 0 else 0
+        if n == 0:
+            return result
+
+        # Use stride_tricks to create rolling windows, then vectorized std
+        # This avoids catastrophic cancellation from cumsum-of-squares
+        # on large values (e.g., BTC prices ~50,000,000)
+        if n >= period:
+            from numpy.lib.stride_tricks import sliding_window_view
+            windows = sliding_window_view(data, period)
+            result[period - 1:] = windows.std(axis=1)
+
+        # Fill initial values (matching original behavior)
+        result[0] = 0
+        for i in range(1, min(period - 1, n)):
+            result[i] = data[:i + 1].std()
         return result
 
     @staticmethod
     def _compute_rsi(closes: np.ndarray, period: int) -> np.ndarray:
+        if len(closes) <= period:
+            return np.full_like(closes, 50.0)
         deltas = np.diff(closes, prepend=closes[0])
         gains = np.where(deltas > 0, deltas, 0)
         losses = np.where(deltas < 0, -deltas, 0)
@@ -252,13 +269,16 @@ class HistoricalDataLoader:
     @staticmethod
     def _compute_atr(highs, lows, closes, period):
         n = len(closes)
-        tr = np.zeros(n)
+        tr = np.empty(n)
         tr[0] = highs[0] - lows[0]
-        for i in range(1, n):
-            tr[i] = max(
-                highs[i] - lows[i],
-                abs(highs[i] - closes[i - 1]),
-                abs(lows[i] - closes[i - 1]),
+        if n > 1:
+            prev_close = closes[:-1]
+            tr[1:] = np.maximum(
+                highs[1:] - lows[1:],
+                np.maximum(
+                    np.abs(highs[1:] - prev_close),
+                    np.abs(lows[1:] - prev_close),
+                ),
             )
         return HistoricalDataLoader._ema(tr, period)
 
@@ -268,11 +288,11 @@ class HistoricalDataLoader:
         plus_dm = np.zeros(n)
         minus_dm = np.zeros(n)
 
-        for i in range(1, n):
-            up = highs[i] - highs[i - 1]
-            down = lows[i - 1] - lows[i]
-            plus_dm[i] = up if (up > down and up > 0) else 0
-            minus_dm[i] = down if (down > up and down > 0) else 0
+        if n > 1:
+            up = highs[1:] - highs[:-1]
+            down = lows[:-1] - lows[1:]
+            plus_dm[1:] = np.where((up > down) & (up > 0), up, 0)
+            minus_dm[1:] = np.where((down > up) & (down > 0), down, 0)
 
         atr = HistoricalDataLoader._compute_atr(highs, lows, closes, period)
         atr = np.where(atr > 0, atr, 1)
@@ -306,13 +326,13 @@ class HistoricalDataLoader:
         """
         db_url = os.environ.get("SUPABASE_DB_URL")
         if not db_url:
-            logger.warning("SUPABASE_DB_URL 미설정 — 외부 시그널 로드 불가")
+            logger.warning("SUPABASE_DB_URL 미설정 -- 외부 시그널 로드 불가")
             return []
 
         try:
             import psycopg2
         except ImportError:
-            logger.warning("psycopg2 미설치 — 외부 시그널 로드 불가")
+            logger.warning("psycopg2 미설치 -- 외부 시그널 로드 불가")
             return []
 
         since = datetime.utcnow() - timedelta(days=days)
@@ -414,7 +434,7 @@ class HistoricalDataLoader:
         """외부 시그널 기본값 (데이터 없을 때 사용)"""
         return {
             "fgi_value": 50,
-            "news_sentiment": "neutral",
+            "news_sentiment": 0,
             "whale_score": 0,
             "funding_rate": 0.0,
             "long_short_ratio": 1.0,

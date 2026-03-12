@@ -90,16 +90,16 @@ def main():
     # 시그널 판단
     if z_score <= -2:
         signal = "eth_undervalued"
-        signal_note = f"ETH/BTC z-score {z_score:.2f} ≤ -2 — ETH 상대 저평가, 시장 구조 변화 가능"
+        signal_note = f"ETH/BTC z-score {z_score:.2f} ≤ -2 -- ETH 상대 저평가, 시장 구조 변화 가능"
     elif z_score >= 2:
         signal = "eth_overvalued"
-        signal_note = f"ETH/BTC z-score {z_score:.2f} ≥ 2 — ETH 상대 고평가, 자금 이동 주시"
+        signal_note = f"ETH/BTC z-score {z_score:.2f} ≥ 2 -- ETH 상대 고평가, 자금 이동 주시"
     elif abs(z_score) >= 1.5:
         signal = "diverging"
-        signal_note = f"ETH/BTC z-score {z_score:.2f} — 괴리 확대 중"
+        signal_note = f"ETH/BTC z-score {z_score:.2f} -- 괴리 확대 중"
     else:
         signal = "normal"
-        signal_note = f"ETH/BTC z-score {z_score:.2f} — 정상 범위"
+        signal_note = f"ETH/BTC z-score {z_score:.2f} -- 정상 범위"
 
     result = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S+09:00"),

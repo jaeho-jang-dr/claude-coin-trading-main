@@ -7,7 +7,7 @@
   - binance_sentiment.json (롱숏/펀딩비/OI/김치프리미엄)
   - ai_signal.json        (Upbit 호가/체결/거래소내 고래)
 
-출력: JSON (stdout) — 종합 외부 시그널 점수 + Data Fusion 판정
+출력: JSON (stdout) -- 종합 외부 시그널 점수 + Data Fusion 판정
 
 점수 체계:
   총점 범위: -100 ~ +100
@@ -117,7 +117,7 @@ def score_binance_derivatives(binance_data: dict) -> dict:
             score += 5
             details.append(f"음수 펀딩 ({rate*100:.3f}%)")
 
-    # 3) 김치 프리미엄 (±10) — 한국 시장 특화 핵심 지표
+    # 3) 김치 프리미엄 (±10) -- 한국 시장 특화 핵심 지표
     kimchi = binance_data.get("kimchi_premium", {})
     premium = kimchi.get("premium_pct", 0)
     if isinstance(premium, (int, float)):
@@ -226,7 +226,7 @@ def calculate_external_signal(
 
     총점: -75 ~ +75 (이론적 최대/최소)
     가중치 배분:
-      - 바이낸스 파생상품:  ±30 (최대 비중 — 스마트머니 + 김치P)
+      - 바이낸스 파생상품:  ±30 (최대 비중 -- 스마트머니 + 김치P)
       - 거래소 내부 고래:   ±15 (실시간 매매 압력, 방향성 있음)
       - 시장 미시구조:      ±15 (호가/체결/거래량, 이중 계산 완화)
       - 온체인 고래:        ±15 (활동량 + 거래소 입출금 방향 추정)
@@ -246,19 +246,19 @@ def calculate_external_signal(
 
     if bullish_count >= 3:
         fusion_signal = "strong_buy"
-        fusion_note = f"{bullish_count}개 지표 동시 강세 — 매수 가중치 강화"
+        fusion_note = f"{bullish_count}개 지표 동시 강세 -- 매수 가중치 강화"
     elif bullish_count >= 2:
         fusion_signal = "buy"
         fusion_note = f"{bullish_count}개 지표 강세 겹침"
     elif bearish_count >= 3:
         fusion_signal = "strong_sell"
-        fusion_note = f"{bearish_count}개 지표 동시 약세 — 매도/조정 경고"
+        fusion_note = f"{bearish_count}개 지표 동시 약세 -- 매도/조정 경고"
     elif bearish_count >= 2:
         fusion_signal = "sell"
         fusion_note = f"{bearish_count}개 지표 약세 겹침"
     elif bullish_count == 1 and bearish_count == 1:
         fusion_signal = "mixed"
-        fusion_note = "강세/약세 혼재 — 방향성 불분명"
+        fusion_note = "강세/약세 혼재 -- 방향성 불분명"
     else:
         fusion_signal = "neutral"
         fusion_note = "외부 지표 중립"

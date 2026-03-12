@@ -105,10 +105,10 @@ class KimchirangDB:
             "kp_stats": stats,
         }
 
+        # Supabase 먼저 시도 (_save_local이 _saved_at 추가하기 전에)
+        await asyncio.to_thread(self._post, "kimchirang_trades", dict(row))
         # 로컬 항상 저장
         self._save_local("trades.jsonl", row)
-        # Supabase 시도
-        await asyncio.to_thread(self._post, "kimchirang_trades", row)
 
     async def record_kp_snapshot(self, snapshot: KPSnapshot, stats: dict):
         """KP 스냅샷 기록 (1분 간격 히스토리)"""
@@ -129,10 +129,10 @@ class KimchirangDB:
             "fx_rate": snapshot.fx_rate,
         }
 
+        # Supabase 먼저 시도 (_save_local이 _saved_at 추가하기 전에)
+        await asyncio.to_thread(self._post, "kimchirang_kp_history", dict(row))
         # 로컬 항상 저장
         self._save_local("kp_history.jsonl", row)
-        # Supabase 시도 (테이블 없으면 실패해도 로컬에는 남음)
-        await asyncio.to_thread(self._post, "kimchirang_kp_history", row)
 
     async def record_error(self, phase: str, error: str):
         """에러 기록"""
@@ -143,10 +143,10 @@ class KimchirangDB:
             "kp_stats": {"error_phase": phase, "error_message": error[:500]},
             "dry_run": True,
         }
+        await asyncio.to_thread(self._post, "kimchirang_trades", dict(row))
         self._save_local("errors.jsonl", row)
-        await asyncio.to_thread(self._post, "kimchirang_trades", row)
 
     async def record_rl_model(self, model_info: dict):
         """RL 모델 성과 기록"""
+        await asyncio.to_thread(self._post, "kimchirang_rl_models", dict(model_info))
         self._save_local("rl_models.jsonl", model_info)
-        await asyncio.to_thread(self._post, "kimchirang_rl_models", model_info)

@@ -37,14 +37,25 @@ function Register-Task {
         -ExecutionTimeLimit (New-TimeSpan -Minutes $TimeLimitMin) `
         -MultipleInstances IgnoreNew
 
-    Register-ScheduledTask `
-        -TaskName $Name `
-        -Description $Description `
-        -Action $action `
-        -Trigger $Trigger `
-        -Settings $settings `
-        -RunLevel Highest `
-        -Force | Out-Null
+    # Try highest first, fallback to limited if access denied
+    try {
+        Register-ScheduledTask `
+            -TaskName $Name `
+            -Description $Description `
+            -Action $action `
+            -Trigger $Trigger `
+            -Settings $settings `
+            -RunLevel Highest `
+            -Force | Out-Null
+    } catch {
+        Register-ScheduledTask `
+            -TaskName $Name `
+            -Description $Description `
+            -Action $action `
+            -Trigger $Trigger `
+            -Settings $settings `
+            -Force | Out-Null
+    }
 
     $info = Get-ScheduledTaskInfo -TaskName $Name -ErrorAction SilentlyContinue
     Write-Host "  [OK] $Name" -ForegroundColor Green

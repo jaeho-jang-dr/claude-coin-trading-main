@@ -13,6 +13,7 @@ data/training_history.json
 data/agent_state.json
 data/trading.lock
 data/auto_emergency.json
+data/db_fallback/
 logs/
 
 # === Supabase 로컬 설정 ===

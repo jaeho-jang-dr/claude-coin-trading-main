@@ -36,10 +36,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("continuous_sb3")
 
-# v3 최적 하이퍼파라미터
+# v8.2 최적 하이퍼파라미터 (정책 붕괴 방지)
 BEST_HP = {
-    "lr": 5e-4,
-    "ent_coef": 0.01,
+    "lr": 3e-4,
+    "ent_coef": 0.08,
     "n_steps": 2048,
     "batch_size": 128,
     "n_epochs": 10,

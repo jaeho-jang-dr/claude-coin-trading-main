@@ -78,10 +78,10 @@ TIERS = {
     },
 }
 
-# v8 최적 HP (보상 함수 v8에 맞춤)
+# v8.2 최적 HP (상수행동 정책 붕괴 방지)
 BEST_HP = {
     "lr": 3e-4,          # 약간 낮춰서 안정적 학습
-    "ent_coef": 0.02,    # 엔트로피 강화 → 정책 붕괴(always-buy) 방지
+    "ent_coef": 0.08,    # 0.02→0.05→0.08: 상수행동 탈출 강화
     "n_steps": 2048,
     "batch_size": 128,
     "n_epochs": 10,
@@ -107,9 +107,10 @@ def _supabase_headers() -> dict:
 
 
 def _save_to_db(result: dict) -> bool:
-    """학습 결과를 Supabase rl_training_log 테이블에 저장"""
+    """학습 결과를 Supabase rl_training_log 테이블에 반드시 저장"""
     if not SUPABASE_URL or not SUPABASE_KEY:
-        logger.warning("Supabase 설정 없음 — DB 저장 건너뜀")
+        logger.error("Supabase 설정 없음 — DB 저장 불가, 로컬 백업")
+        _save_db_fallback_row(result)
         return False
 
     baseline = result.get("baseline", {})
@@ -151,8 +152,21 @@ def _save_to_db(result: dict) -> bool:
             logger.warning(f"DB 저장 실패: {r.status_code} {r.text[:200]}")
             return False
     except Exception as e:
-        logger.warning(f"DB 저장 예외: {e}")
+        logger.error(f"DB 저장 예외: {e}")
+        _save_db_fallback_row(result)
         return False
+
+
+def _save_db_fallback_row(result: dict):
+    """DB 저장 실패 시 로컬 JSON 백업"""
+    from datetime import datetime as _dt
+    fallback_dir = PROJECT_DIR / "data" / "db_fallback"
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+    tier = result.get("tier", "unknown")
+    path = fallback_dir / f"training_{tier}_{ts}.json"
+    path.write_text(json.dumps(result, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    logger.warning(f"DB 실패 → 로컬 백업: {path}")
 
 
 def linear_schedule(initial_value: float):

@@ -45,10 +45,10 @@ logger = logging.getLogger("train_1h")
 
 KST = timezone(timedelta(hours=9))
 
-# ─── v8 최적 하이퍼파라미터 ───
+# ─── v8.2 최적 하이퍼파라미터 (정책 붕괴 방지) ───
 BEST_HP = {
     "lr": 3e-4,
-    "ent_coef": 0.02,
+    "ent_coef": 0.08,       # 0.02→0.05→0.08: 상수행동 탈출 강화
     "n_steps": 2048,
     "batch_size": 128,
     "n_epochs": 10,
@@ -259,8 +259,29 @@ def run_phase(phase: dict, model=None, force_reward: str = None) -> tuple:
     actual_lr = BEST_HP["lr"] * phase["lr_ratio"]
     ent_coef = phase["ent_coef_override"] or BEST_HP["ent_coef"]
 
+    def _create_fresh_model(env, lr, ec):
+        """새 모델 생성 (정책 붕괴 탈출용)"""
+        return PPO(
+            "MlpPolicy",
+            env,
+            learning_rate=linear_schedule(lr),
+            n_steps=BEST_HP["n_steps"],
+            batch_size=BEST_HP["batch_size"],
+            n_epochs=BEST_HP["n_epochs"],
+            gamma=BEST_HP["gamma"],
+            gae_lambda=BEST_HP["gae_lambda"],
+            clip_range=BEST_HP["clip_range"],
+            ent_coef=ec,
+            vf_coef=BEST_HP["vf_coef"],
+            max_grad_norm=BEST_HP["max_grad_norm"],
+            verbose=1,
+            policy_kwargs={
+                "net_arch": {"pi": [256, 128, 64], "vf": [256, 128, 64]},
+            },
+        )
+
     if model is None:
-        # Phase 1: 기존 모델 로드 시도, 없으면 새로 생성
+        # Phase 1: 기존 모델 로드 시도
         model_path = os.path.join(MODEL_DIR, "ppo_btc_latest")
         if not os.path.exists(model_path + ".zip"):
             model_path = os.path.join(MODEL_DIR, "v3_final")
@@ -268,28 +289,22 @@ def run_phase(phase: dict, model=None, force_reward: str = None) -> tuple:
         if os.path.exists(model_path + ".zip"):
             logger.info(f"  기존 모델 로드: {model_path}")
             model = PPO.load(model_path, env=train_env)
+
+            # 정책 붕괴 감지: trades<=2면 새로 시작
+            collapse_check = evaluate(model, eval_env, episodes=3)
+            if collapse_check["trades"] <= 2:
+                logger.warning(f"  정책 붕괴 감지 (trades={collapse_check['trades']:.0f}) → 새 모델로 재시작")
+                model = _create_fresh_model(train_env, actual_lr, ent_coef)
         else:
             logger.info("  새 모델 생성")
-            model = PPO(
-                "MlpPolicy",
-                train_env,
-                learning_rate=linear_schedule(actual_lr),
-                n_steps=BEST_HP["n_steps"],
-                batch_size=BEST_HP["batch_size"],
-                n_epochs=BEST_HP["n_epochs"],
-                gamma=BEST_HP["gamma"],
-                gae_lambda=BEST_HP["gae_lambda"],
-                clip_range=BEST_HP["clip_range"],
-                ent_coef=ent_coef,
-                vf_coef=BEST_HP["vf_coef"],
-                max_grad_norm=BEST_HP["max_grad_norm"],
-                verbose=1,
-                policy_kwargs={
-                    "net_arch": {"pi": [256, 128, 64], "vf": [256, 128, 64]},
-                },
-            )
+            model = _create_fresh_model(train_env, actual_lr, ent_coef)
     else:
+        # 이전 Phase에서 이어받은 모델도 붕괴 체크
         model.set_env(train_env)
+        collapse_check = evaluate(model, eval_env, episodes=3)
+        if collapse_check["trades"] <= 2 and phase_id <= 2:
+            logger.warning(f"  정책 붕괴 지속 (trades={collapse_check['trades']:.0f}) → 새 모델로 재시작")
+            model = _create_fresh_model(train_env, actual_lr, ent_coef)
 
     # LR / 엔트로피 조정
     model.learning_rate = linear_schedule(actual_lr)
@@ -508,10 +523,14 @@ def run_full_training(
 
 
 def _save_to_db(summary: dict):
-    """Supabase에 학습 결과 저장"""
+    """Supabase에 학습 결과 저장 (반드시 저장 — 실패 시 로컬 백업)"""
+    import requests as req
+
     url = os.environ.get("SUPABASE_URL", "").rstrip("/")
     key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
     if not url or not key:
+        logger.error("DB 저장 불가: SUPABASE_URL 또는 SUPABASE_SERVICE_ROLE_KEY 미설정")
+        _save_db_fallback(summary)
         return
 
     headers = {
@@ -520,6 +539,9 @@ def _save_to_db(summary: dict):
         "Content-Type": "application/json",
         "Prefer": "return=minimal",
     }
+
+    saved = 0
+    failed = 0
 
     for phase_result in summary.get("phases", []):
         if "error" in phase_result:
@@ -551,17 +573,48 @@ def _save_to_db(summary: dict):
         }
 
         try:
-            import requests
-            r = requests.post(
+            r = req.post(
                 f"{url}/rest/v1/rl_training_log",
                 headers=headers,
                 json=row,
                 timeout=10,
             )
-            if r.status_code not in (200, 201):
-                logger.warning(f"DB 저장 실패: {r.status_code}")
+            if r.status_code in (200, 201):
+                saved += 1
+            else:
+                logger.error(f"DB 저장 실패 Phase {phase_result['phase']}: {r.status_code} {r.text[:200]}")
+                failed += 1
         except Exception as e:
-            logger.warning(f"DB 저장 예외: {e}")
+            logger.error(f"DB 저장 예외 Phase {phase_result['phase']}: {e}")
+            failed += 1
+
+    if saved > 0:
+        logger.info(f"DB 저장 완료: {saved}건 성공, {failed}건 실패")
+    if failed > 0:
+        _save_db_fallback(summary)
+
+
+def _save_db_fallback(summary: dict):
+    """DB 저장 실패 시 로컬 JSON 백업"""
+    fallback_dir = PROJECT_DIR / "data" / "db_fallback"
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(KST).strftime("%Y%m%d_%H%M%S")
+    path = fallback_dir / f"training_{ts}.json"
+
+    def convert(obj):
+        if isinstance(obj, (np.floating, np.integer)):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, dict):
+            return {k: convert(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [convert(i) for i in obj]
+        return obj
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(convert(summary), f, indent=2, ensure_ascii=False)
+    logger.warning(f"DB 실패 → 로컬 백업 저장: {path}")
 
 
 def _notify_result(summary: dict):

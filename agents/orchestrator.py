@@ -59,7 +59,8 @@ def _release_lock(lock_path: str):
 
 def _load_state() -> dict:
     lock_path = str(STATE_FILE) + ".lock"
-    _acquire_lock(lock_path)
+    if not _acquire_lock(lock_path):
+        print("[orchestrator] WARNING: state lock 획득 실패, 락 없이 진행", file=sys.stderr)
     try:
         with open(STATE_FILE, encoding="utf-8") as f:
             return json.load(f)
@@ -77,7 +78,8 @@ def _load_state() -> dict:
 
 def _save_state(state: dict) -> None:
     lock_path = str(STATE_FILE) + ".lock"
-    _acquire_lock(lock_path)
+    if not _acquire_lock(lock_path):
+        print("[orchestrator] WARNING: state lock 획득 실패, 락 없이 진행", file=sys.stderr)
     try:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(STATE_FILE, "w", encoding="utf-8") as f:

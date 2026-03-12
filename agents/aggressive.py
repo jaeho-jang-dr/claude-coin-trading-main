@@ -111,7 +111,7 @@ class AggressiveAgent(BaseStrategyAgent):
                         self._calculate_trade_amount(total_krw, external_bonus),
                     )
                     if dca_amount < 5000:  # Upbit minimum order is 5000 KRW
-                        return Decision(decision="hold", reason="DCA 금액 부족 (최소 5000원 미만)", confidence=0.3, trade_params=None)
+                        return Decision(decision="hold", reason="DCA 금액 부족 (최소 5000원 미만)", confidence=0.3, buy_score=buy_score, trade_params={}, external_signal=external_signal, agent_name=f"{self.emoji} {self.name}")
                     return Decision(
                         decision="buy",
                         confidence=0.6,
@@ -126,7 +126,10 @@ class AggressiveAgent(BaseStrategyAgent):
                         decision="hold",
                         reason=sell_eval.get("reason", "수익 실현 보류 (AI 신호 강세)"),
                         confidence=0.5,
-                        trade_params=None
+                        buy_score=buy_score,
+                        trade_params={},
+                        external_signal=external_signal,
+                        agent_name=f"{self.emoji} {self.name}",
                     )
 
         # 매수 판단 (공격적: AI 필터 완화)

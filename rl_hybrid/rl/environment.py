@@ -24,6 +24,8 @@ from gymnasium import spaces
 
 from rl_hybrid.rl.state_encoder import StateEncoder, OBSERVATION_DIM
 from rl_hybrid.rl.reward import RewardCalculator, TRANSACTION_COST
+from rl_hybrid.rl.reward_v7 import RewardCalculatorV7
+from rl_hybrid.rl.reward_v8 import RewardCalculatorV8
 from rl_hybrid.rl.data_loader import HistoricalDataLoader
 
 logger = logging.getLogger("rl.environment")
@@ -41,7 +43,7 @@ class BitcoinTradingEnv(gym.Env):
         max_steps: int = None,
         lookback: int = 24,  # 과거 N봉 참조
         render_mode: str = None,
-        external_signals: list[dict] | None = None,
+        reward_version: str = "v6",  # v6, v7, v8
     ):
         """
         Args:
@@ -50,8 +52,6 @@ class BitcoinTradingEnv(gym.Env):
             max_steps: 에피소드 최대 스텝 (None이면 전체 데이터 사용)
             lookback: 관측에 포함할 과거 봉 수
             render_mode: "human" 또는 "ansi"
-            external_signals: 캔들과 동일 길이로 정렬된 외부 시그널 리스트.
-                None이면 기본 상수값 사용 (기존 동작).
         """
         super().__init__()
 
@@ -62,7 +62,6 @@ class BitcoinTradingEnv(gym.Env):
             candles = loader.compute_indicators(raw)
 
         self.candles = candles
-        self.external_signals = external_signals
         self.initial_balance = initial_balance
         self.lookback = lookback
         self.render_mode = render_mode
@@ -72,11 +71,6 @@ class BitcoinTradingEnv(gym.Env):
         self.end_idx = len(candles) - 1
         if max_steps:
             self.end_idx = min(self.start_idx + max_steps, self.end_idx)
-        # Guard: very short datasets (< lookback candles)
-        if self.end_idx <= self.start_idx:
-            self.end_idx = len(candles) - 1
-            self.start_idx = min(self.start_idx, self.end_idx - 1)
-        self.start_idx = max(0, self.start_idx)
 
         # 관측 공간: 42차원 (현재 상태) + lookback * 5 (과거 OHLCV 압축)
         # 간소화: 42차원만 사용 (과거 정보는 지표에 이미 반영)
@@ -91,20 +85,23 @@ class BitcoinTradingEnv(gym.Env):
 
         # 내부 구성요소
         self.encoder = StateEncoder()
-        self.reward_calc = RewardCalculator()
+        self.reward_version = reward_version
+        if reward_version == "v8":
+            self.reward_calc = RewardCalculatorV8()
+        elif reward_version == "v7":
+            self.reward_calc = RewardCalculatorV7()
+        else:
+            self.reward_calc = RewardCalculator()
 
         # 상태 변수 (reset에서 초기화)
         self.current_step = 0
         self.krw_balance = 0.0
         self.btc_balance = 0.0
+        self.avg_buy_price = 0.0  # 실제 평균 매수가 추적
         self.prev_action = 0.0
         self.total_value_history = []
         self.action_history = []
         self.trade_count = 0
-
-        # 외부 데이터 캐시 (signals가 없으면 매 스텝 동일한 dict 반환)
-        self._cached_external_data: dict | None = None
-        self._cached_external_step: int = -1
 
     def reset(self, seed=None, options=None):
         """환경 리셋"""
@@ -119,12 +116,11 @@ class BitcoinTradingEnv(gym.Env):
 
         self.krw_balance = self.initial_balance
         self.btc_balance = 0.0
+        self.avg_buy_price = 0.0
         self.prev_action = 0.0
         self.total_value_history = [self.initial_balance]
         self.action_history = []
         self.trade_count = 0
-        self._cached_external_data = None
-        self._cached_external_step = -1
 
         self.reward_calc.reset(self.initial_balance)
 
@@ -163,13 +159,16 @@ class BitcoinTradingEnv(gym.Env):
         self.action_history.append(action_val)
 
         # 보상 계산
-        reward_info = self.reward_calc.calculate(
+        calc_kwargs = dict(
             prev_portfolio_value=prev_value,
             curr_portfolio_value=curr_value,
             action=action_val,
             prev_action=self.prev_action,
             step=self.current_step,
         )
+        if self.reward_version in ("v7", "v8"):
+            calc_kwargs["price"] = price
+        reward_info = self.reward_calc.calculate(**calc_kwargs)
 
         self.prev_action = action_val
 
@@ -210,6 +209,10 @@ class BitcoinTradingEnv(gym.Env):
             cost = buy_amount * TRANSACTION_COST
             actual_buy = buy_amount - cost
             btc_bought = actual_buy / price
+            # 평균 매수가 갱신 (가중 평균)
+            if self.btc_balance + btc_bought > 0:
+                total_cost = self.avg_buy_price * self.btc_balance + price * btc_bought
+                self.avg_buy_price = total_cost / (self.btc_balance + btc_bought)
             self.krw_balance -= buy_amount
             self.btc_balance += btc_bought
             if buy_amount > total_value * 0.01:
@@ -230,18 +233,12 @@ class BitcoinTradingEnv(gym.Env):
         """현재 포트폴리오 가치 (KRW)"""
         return self.krw_balance + self.btc_balance * price
 
-    # 재사용 가능한 고정 dict 템플릿 (매 스텝 동일한 부분)
-    _STATIC_ORDERBOOK = {"ratio": 1.0}
-    _STATIC_TRADE_PRESSURE = {"buy_volume": 1, "sell_volume": 1}
-    _STATIC_ETH_BTC = {"eth_btc_z_score": 0}
-
     def _get_observation(self) -> np.ndarray:
         """현재 관측 벡터 생성"""
         candle = self.candles[self.current_step]
         price = candle["close"]
 
         # 시장 데이터 → StateEncoder 호환 형식
-        # 내부 dict를 매번 새로 만들되, 고정 부분은 클래스 상수 참조
         market_data = {
             "current_price": price,
             "change_rate_24h": candle.get("change_rate", 0),
@@ -271,134 +268,83 @@ class BitcoinTradingEnv(gym.Env):
                 "atr": candle.get("atr", 0),
             },
             "indicators_4h": {"rsi_14": candle.get("rsi_14", 50)},
-            "orderbook": self._STATIC_ORDERBOOK,
-            "trade_pressure": self._STATIC_TRADE_PRESSURE,
-            "eth_btc_analysis": self._STATIC_ETH_BTC,
+            "orderbook": {"ratio": 1.0},
+            "trade_pressure": {"buy_volume": 1, "sell_volume": 1},
+            "eth_btc_analysis": {"eth_btc_z_score": 0},
         }
 
-        # 외부 데이터: 실제 시그널이 있으면 사용, 없으면 기본 상수값 (캐시됨)
-        external_data = self._build_external_data()
+        # 외부 데이터 (시뮬레이션: 가격 기반 동적 생성 + 노이즈)
+        # 가격 변동률로 시뮬레이션 감성 데이터 생성 (일정값 대신)
+        change_rate = candle.get("change_rate", 0)
+        rsi = candle.get("rsi_14", 50)
+        rng = self.np_random
+
+        # RSI/가격변동에 연동된 시뮬레이션 FGI (50 ± 노이즈)
+        sim_fgi = np.clip(50 + change_rate * 200 + rng.normal(0, 8), 5, 95)
+        # 뉴스 감성: 가격 변동 방향 + 노이즈
+        sim_news = np.clip(change_rate * 300 + rng.normal(0, 10), -50, 50)
+        # 펀딩 레이트: RSI 기반
+        sim_funding = np.clip((rsi - 50) * 0.002 + rng.normal(0, 0.005), -0.05, 0.05)
+
+        external_data = {
+            "sources": {
+                "fear_greed": {"current": {"value": float(sim_fgi)}},
+                "news_sentiment": {"sentiment_score": float(sim_news)},
+                "whale_tracker": {"whale_score": {"score": float(rng.normal(0, 5))}},
+                "binance_sentiment": {
+                    "funding_rate": {"current_rate": float(sim_funding)},
+                    "top_trader_long_short": {"current_ratio": float(np.clip(1.0 + rng.normal(0, 0.2), 0.5, 2.0))},
+                    "kimchi_premium": {"premium_pct": float(rng.normal(1.5, 0.8))},
+                },
+                "macro": {"analysis": {"macro_score": float(rng.normal(0, 5))}},
+                "ai_signal": {"ai_composite_signal": {"score": float(np.clip(change_rate * 500 + rng.normal(0, 15), -50, 50))}},
+                "coinmarketcap": {"btc_dominance": float(np.clip(55 + rng.normal(0, 3), 40, 70))}},
+            "external_signal": {"total_score": float(np.clip(change_rate * 400 + rng.normal(0, 10), -50, 50))},
+        }
 
         # 포트폴리오
         total_value = self._portfolio_value(price)
         btc_eval = self.btc_balance * price
-        if self.btc_balance > 0:
-            holdings = [{
-                "currency": "BTC",
-                "balance": self.btc_balance,
-                "avg_buy_price": price,
-                "eval_amount": btc_eval,
-                "profit_loss_pct": 0,
-            }]
-        else:
-            holdings = []
-
+        pnl_pct = ((price - self.avg_buy_price) / self.avg_buy_price * 100) if self.avg_buy_price > 0 else 0
         portfolio = {
             "krw_balance": self.krw_balance,
-            "holdings": holdings,
+            "holdings": [{
+                "currency": "BTC",
+                "balance": self.btc_balance,
+                "avg_buy_price": self.avg_buy_price,
+                "eval_amount": btc_eval,
+                "profit_loss_pct": pnl_pct,
+            }] if self.btc_balance > 0 else [],
             "total_eval": total_value,
         }
 
-        # 에이전트 상태 — 재사용 가능한 dict (trade_count만 변동)
+        # 에이전트 상태 (동적)
+        # 위험 점수: MDD 기반, 기회 점수: RSI 기반
+        values = self.total_value_history
+        recent_dd = 0
+        if len(values) > 10:
+            peak = max(values[-10:])
+            recent_dd = (peak - values[-1]) / peak * 100
         agent_state = {
-            "danger_score": 30,
-            "opportunity_score": 30,
-            "cascade_risk": 20,
+            "danger_score": min(80, 20 + recent_dd * 5),
+            "opportunity_score": max(10, 70 - abs(rsi - 50)),
+            "cascade_risk": min(60, 10 + recent_dd * 3),
             "consecutive_losses": 0,
-            "hours_since_last_trade": 24,
+            "hours_since_last_trade": min(
+                72,
+                max(
+                    1,
+                    getattr(
+                        self.reward_calc,
+                        "steps_since_trade",
+                        getattr(self.reward_calc, "steps_since_last_trade", 0),
+                    ),
+                ),
+            ),
             "daily_trade_count": self.trade_count,
         }
 
         return self.encoder.encode(market_data, external_data, portfolio, agent_state)
-
-    # === 감성 텍스트 → 숫자 변환 맵 ===
-    _SENTIMENT_MAP = {
-        "very_positive": 80,
-        "positive": 50,
-        "slightly_positive": 25,
-        "neutral": 0,
-        "slightly_negative": -25,
-        "negative": -50,
-        "very_negative": -80,
-    }
-
-    def _build_external_data(self) -> dict:
-        """외부 데이터 dict 생성 — StateEncoder 호환 형식
-
-        self.external_signals가 있고 현재 스텝에 데이터가 있으면
-        실제 값을 사용하고, 없으면 기본 상수값을 반환한다.
-
-        Caching: 외부 시그널이 없을 때는 매 스텝 동일한 dict이므로 캐시.
-        시그널이 있을 때는 스텝별로 다르므로 스텝 기준 캐시.
-        """
-        # 캐시 히트 확인
-        if self._cached_external_data is not None:
-            if self.external_signals is None:
-                # 시그널 없으면 항상 동일 → 캐시 반환
-                return self._cached_external_data
-            if self._cached_external_step == self.current_step:
-                return self._cached_external_data
-
-        # 기본값
-        fgi = 50
-        news_score = 0
-        whale = 0
-        funding = 0.0
-        ls_ratio = 1.0
-        kimchi = 0.0
-        macro = 0
-        fusion = 0
-        nvt = 100.0
-        # eth_btc_score는 외부 시그널에 있지만 StateEncoder는
-        # market_data.eth_btc_analysis에서 읽으므로 여기선 사용 안 함
-
-        if (
-            self.external_signals is not None
-            and self.current_step < len(self.external_signals)
-        ):
-            sig = self.external_signals[self.current_step]
-
-            fgi = sig.get("fgi_value", 50) or 50
-            whale = sig.get("whale_score", 0) or 0
-            funding = sig.get("funding_rate", 0.0) or 0.0
-            ls_ratio = sig.get("long_short_ratio", 1.0) or 1.0
-            kimchi = sig.get("kimchi_premium_pct", 0.0) or 0.0
-            macro = sig.get("macro_score", 0) or 0
-            fusion = sig.get("fusion_score", 0) or 0
-            nvt = sig.get("nvt_signal", 100.0) or 100.0
-
-            # news_sentiment: 텍스트 → 숫자 변환
-            raw_sentiment = sig.get("news_sentiment", "neutral")
-            if isinstance(raw_sentiment, (int, float)):
-                news_score = float(raw_sentiment)
-            elif isinstance(raw_sentiment, str):
-                news_score = self._SENTIMENT_MAP.get(
-                    raw_sentiment.lower().strip(), 0
-                )
-            else:
-                news_score = 0
-
-        result = {
-            "sources": {
-                "fear_greed": {"current": {"value": float(fgi)}},
-                "news_sentiment": {"sentiment_score": float(news_score)},
-                "whale_tracker": {"whale_score": {"score": float(whale)}},
-                "binance_sentiment": {
-                    "funding_rate": {"current_rate": float(funding)},
-                    "top_trader_long_short": {"current_ratio": float(ls_ratio)},
-                    "kimchi_premium": {"premium_pct": float(kimchi)},
-                },
-                "macro": {"analysis": {"macro_score": float(macro)}},
-                "ai_signal": {"ai_composite_signal": {"score": 0}},
-                "coinmarketcap": {"btc_dominance": 50},
-            },
-            "external_signal": {"total_score": float(fusion)},
-            "nvt_signal": float(nvt),
-        }
-
-        self._cached_external_data = result
-        self._cached_external_step = self.current_step
-        return result
 
     def _get_info(self) -> dict:
         """디버깅/로깅용 info dict"""
@@ -431,15 +377,7 @@ class BitcoinTradingEnv(gym.Env):
                 f"거래: {info['trade_count']}회"
             )
         elif self.render_mode == "human":
-            # Build state string directly (avoid recursion)
-            price = self.candles[self.current_step]["close"]
-            portfolio_value = self._portfolio_value(price)
-            state = (f"Step {self.current_step} | "
-                     f"Balance: {self.krw_balance:,.0f} | "
-                     f"BTC: {self.btc_balance:.6f} | "
-                     f"Value: {portfolio_value:,.0f}")
-            print(state)
-            return state
+            print(self.render.__func__(self))
 
     def get_episode_stats(self) -> dict:
         """에피소드 통계"""
@@ -462,10 +400,10 @@ class BitcoinTradingEnvWithLLM(BitcoinTradingEnv):
         self.llm_embedding_dim = llm_embedding_dim
         self.llm_embedding = np.zeros(llm_embedding_dim, dtype=np.float32)
 
-        # 관측 공간 확장 (LLM 임베딩은 음수 가능)
+        # 관측 공간 확장
         total_dim = OBSERVATION_DIM + llm_embedding_dim
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(total_dim,), dtype=np.float32
+            low=0.0, high=1.0, shape=(total_dim,), dtype=np.float32
         )
 
     def set_llm_embedding(self, embedding: np.ndarray):

@@ -67,6 +67,15 @@ TIERS = {
         "description": "매주 일요일 04:00 전체 재학습",
         "schedule": {"type": "weekly", "day": "Sunday", "time": "04:00"},
     },
+    "tier4": {
+        "name": "Monthly 1H Intensive",
+        "steps": 500_000,
+        "days": 180,
+        "lr_ratio": 1.0,       # 5-Phase 커리큘럼
+        "eval_episodes": 20,
+        "description": "매월 1일 02:00 1시간 집중 훈련 (5-Phase)",
+        "schedule": {"type": "monthly", "day": 1, "time": "02:00"},
+    },
 }
 
 # v8 최적 HP (보상 함수 v8에 맞춤)
@@ -331,8 +340,8 @@ def run_tier(tier_key: str) -> dict:
     save_history(history)
     _save_to_db(result)
 
-    # 8. 텔레그램 알림 (tier2, tier3만)
-    if tier_key in ("tier2", "tier3"):
+    # 8. 텔레그램 알림 (tier2, tier3, tier4)
+    if tier_key in ("tier2", "tier3", "tier4"):
         _notify_result(result)
 
     elapsed = result["elapsed_sec"]
@@ -406,6 +415,8 @@ def show_status():
             when = f"매 {sched['interval']}시간"
         elif sched["type"] == "daily":
             when = f"매일 {sched['time']}"
+        elif sched["type"] == "monthly":
+            when = f"매월 {sched['day']}일 {sched['time']}"
         else:
             when = f"매주 {sched['day']} {sched['time']}"
         print(f"  [{key}] {tier['name']}")
@@ -484,14 +495,20 @@ def register_tasks():
             trigger_cmd = (
                 f"$trigger = New-ScheduledTaskTrigger -Daily -At '{sched['time']}'"
             )
+        elif sched["type"] == "monthly":
+            # Monthly: 매월 특정 일에 실행
+            trigger_cmd = (
+                f"$trigger = New-ScheduledTaskTrigger -Once -At '{sched['time']}'\n"
+                f"$trigger.Repetition.Interval = 'P31D'"
+            )
         else:  # weekly
             trigger_cmd = (
                 f"$trigger = New-ScheduledTaskTrigger -Weekly "
                 f"-DaysOfWeek {sched['day']} -At '{sched['time']}'"
             )
 
-        # tier3는 최대 60분 실행 시간
-        time_limit = 60 if tier_key == "tier3" else 30
+        # tier4=90분, tier3=60분, 나머지=30분
+        time_limit = 90 if tier_key == "tier4" else 60 if tier_key == "tier3" else 30
 
         settings_cmd = (
             f"$settings = New-ScheduledTaskSettingsSet "
@@ -567,7 +584,7 @@ def main():
     parser = argparse.ArgumentParser(description="RL 학습 통합 스케줄러")
     parser.add_argument(
         "action",
-        choices=["tier1", "tier2", "tier3", "status", "register", "remove", "backfill"],
+        choices=["tier1", "tier2", "tier3", "tier4", "status", "register", "remove", "backfill"],
         help="실행할 작업",
     )
     args = parser.parse_args()
@@ -580,6 +597,11 @@ def main():
         remove_tasks()
     elif args.action == "backfill":
         backfill_db()
+    elif args.action == "tier4":
+        # tier4는 1시간 집중 훈련 스크립트 호출
+        from scripts.train_1h_intensive import run_full_training
+        result = run_full_training()
+        print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
     else:
         result = run_tier(args.action)
         print(json.dumps(result, indent=2, ensure_ascii=False, default=str))

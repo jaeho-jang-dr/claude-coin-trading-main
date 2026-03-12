@@ -51,7 +51,7 @@ def acquire_lock(timeout=15):
         if LOCK_FILE.exists():
             try:
                 data = json.loads(LOCK_FILE.read_text())
-                lock_time = datetime.fromisoformat(data["timestamp"])
+                lock_time = datetime.fromisoformat(data.get("timestamp") or data.get("time", ""))
                 age = (datetime.now(KST) - lock_time).total_seconds()
                 lock_pid = data.get("pid", 0)
                 # 프로세스 생존 확인 (pid=0이면 검사 생략)
@@ -125,14 +125,18 @@ def check_open_orders_and_cancel(market: str, side: str):
 
 
 def make_auth_header(query_string: str) -> dict:
+    access_key = os.environ.get("UPBIT_ACCESS_KEY", "")
+    secret_key = os.environ.get("UPBIT_SECRET_KEY", "")
+    if not access_key or not secret_key:
+        raise ValueError("UPBIT_ACCESS_KEY / UPBIT_SECRET_KEY 환경변수가 설정되지 않았습니다")
     payload = {
-        "access_key": os.environ["UPBIT_ACCESS_KEY"],
+        "access_key": access_key,
         "nonce": str(uuid.uuid4()),
         "timestamp": int(time.time() * 1000),
         "query_hash": hashlib.sha512(query_string.encode()).hexdigest(),
         "query_hash_alg": "SHA512",
     }
-    token = jwt.encode(payload, os.environ["UPBIT_SECRET_KEY"], algorithm="HS256")
+    token = jwt.encode(payload, secret_key, algorithm="HS256")
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 
@@ -266,9 +270,20 @@ def execute(side: str, market: str, amount: str):
             "amount": amount,
             "error": f"주문 요청 실패: {e}",
             "timestamp": ts,
-            "_exec_started": exec_started.isoformat() if 'exec_started' in dir() else None,
+            "_exec_started": exec_started.isoformat() if 'exec_started' in locals() else None,
             "_exec_completed": exec_completed.isoformat(),
             "_latency_ms": None,
+        }
+    except ValueError as e:
+        # API key 미설정 등
+        return {
+            "success": False,
+            "dry_run": False,
+            "side": side,
+            "market": market,
+            "amount": amount,
+            "error": str(e),
+            "timestamp": ts,
         }
     finally:
         release_lock()
@@ -338,6 +353,19 @@ def _record_trade_to_db(result: dict, source: str = "manual"):
         )
         if r.ok:
             print(f"[DB] 매매 기록 저장 완료 (source={source})", file=sys.stderr)
+        elif "dry_run" in r.text:
+            # dry_run 컬럼 없으면 제거 후 재시도
+            decision_row.pop("dry_run", None)
+            r2 = requests.post(
+                f"{url}/rest/v1/decisions",
+                json=decision_row,
+                headers=headers,
+                timeout=10,
+            )
+            if r2.ok:
+                print(f"[DB] 매매 기록 저장 완료 (dry_run 컬럼 없음, source={source})", file=sys.stderr)
+            else:
+                print(f"[DB] 매매 기록 저장 실패: {r2.status_code} {r2.text[:200]}", file=sys.stderr)
         else:
             print(f"[DB] 매매 기록 저장 실패: {r.status_code} {r.text[:200]}", file=sys.stderr)
 

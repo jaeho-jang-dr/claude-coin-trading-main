@@ -273,7 +273,7 @@ def acquire_lock(owner="short_term"):
     try:
         fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         with os.fdopen(fd, 'w') as f:
-            json.dump({"owner": owner, "pid": os.getpid(), "time": datetime.now(KST).isoformat()}, f)
+            json.dump({"process": owner, "pid": os.getpid(), "timestamp": datetime.now(KST).isoformat()}, f)
         return True
     except FileExistsError:
         return False

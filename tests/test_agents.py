@@ -148,22 +148,26 @@ class TestBaseAgentBuyScore:
         assert score["fgi"]["score"] == 35
 
     def test_fgi_partial(self, conservative):
-        """FGI가 임계값 초과 10 이내면 부분 점수 50%."""
+        """FGI가 임계값 초과 10 이내면 부분 점수 50%.
+        v2: conservative.fgi_threshold=35, so FGI=41 falls in partial zone (35 < 41 <= 45).
+        """
         score = conservative.calculate_buy_score(
-            fgi=35, rsi=70, sma_deviation=5.0,
+            fgi=41, rsi=70, sma_deviation=5.0,
             news_negative=True, external_bonus=0,
         )
-        # 35 > 30 but <= 40 → partial (30*0.5=15)
-        assert score["fgi"]["score"] == 15
+        # 41 > 35 but <= 45 → partial (35*0.5=17, int→17)
+        assert score["fgi"]["score"] == int(conservative.fgi_points * 0.5)
         assert score["fgi"].get("partial") is True
 
     def test_rsi_partial(self, conservative):
-        """RSI가 임계값 +5 이내면 부분 점수 15점."""
+        """RSI가 임계값 +5 이내면 부분 점수 15점.
+        v2: conservative.rsi_threshold=35, so RSI=38 falls in partial zone (35 < 38 <= 40).
+        """
         score = conservative.calculate_buy_score(
-            fgi=80, rsi=33, sma_deviation=5.0,
+            fgi=80, rsi=38, sma_deviation=5.0,
             news_negative=True, external_bonus=0,
         )
-        # RSI 33 > 30 but <= 35 → 15점
+        # RSI 38 > 35 but <= 40 → 15점 (partial fixed score)
         assert score["rsi"]["score"] == 15
         assert score["rsi"].get("partial") is True
 
@@ -220,12 +224,16 @@ class TestBaseAgentBuyScore:
         assert score["result"] == "buy"
 
     def test_threshold_boundary_hold(self, conservative):
-        """임계 점수 미만이면 관망."""
+        """임계 점수 미만이면 관망.
+        v2: threshold=60. FGI partial(41>35<=45→15), RSI partial(38>35<=40→15),
+        SMA 0, News 0 = 30 < 60 → hold.
+        """
         score = conservative.calculate_buy_score(
-            fgi=35, rsi=33, sma_deviation=-2.0,
+            fgi=41, rsi=38, sma_deviation=-1.0,
             news_negative=True, external_bonus=0,
         )
-        # FGI partial 15, RSI partial 15, SMA 0, news 0 = 30 < 70
+        # FGI partial 15 (int(30*0.5)), RSI partial 15, SMA 0, news 0 = 30 < 60
+        assert score["total"] < conservative.buy_score_threshold
         assert score["result"] == "hold"
 
 
@@ -509,9 +517,11 @@ class TestConservativeAgent:
     """ConservativeAgent 전략 테스트."""
 
     def test_thresholds(self, conservative):
-        assert conservative.buy_score_threshold == 70
-        assert conservative.fgi_threshold == 30
-        assert conservative.rsi_threshold == 30
+        # v2 조정(2026-03-11): threshold 70→60, FGI 30→35, RSI 30→35, SMA -5→-3
+        assert conservative.buy_score_threshold == 60
+        assert conservative.fgi_threshold == 35
+        assert conservative.rsi_threshold == 35
+        assert conservative.sma_deviation_pct == -3.0
         assert conservative.stop_loss_pct == -5.0
         assert conservative.forced_stop_loss_pct == -10.0
         assert conservative.target_profit_pct == 15.0
@@ -608,9 +618,11 @@ class TestConservativeAgent:
 class TestModerateAgent:
 
     def test_thresholds(self, moderate):
-        assert moderate.buy_score_threshold == 55
+        # v2 조정(2026-03-11): threshold 55→50, SMA -3→-2
+        assert moderate.buy_score_threshold == 50
         assert moderate.fgi_threshold == 45
         assert moderate.rsi_threshold == 40
+        assert moderate.sma_deviation_pct == -2.0
         assert moderate.target_profit_pct == 10.0
         assert moderate.macd_bonus is True
 
@@ -663,7 +675,8 @@ class TestModerateAgent:
 class TestAggressiveAgent:
 
     def test_thresholds(self, aggressive):
-        assert aggressive.buy_score_threshold == 45
+        # v2 조정(2026-03-11): threshold 45→40
+        assert aggressive.buy_score_threshold == 40
         assert aggressive.fgi_threshold == 60
         assert aggressive.rsi_threshold == 50
         assert aggressive.target_profit_pct == 7.0

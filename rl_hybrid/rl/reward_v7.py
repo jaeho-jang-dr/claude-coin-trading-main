@@ -38,6 +38,7 @@ class RewardCalculatorV7:
         self.price_history: deque[float] = deque(maxlen=trend_window)
         self.peak_value = 0.0
         self.total_trades = 0
+        self.steps_since_trade = 0
         self.prev_portfolio_value = 0.0
 
     def reset(self, initial_value: float):
@@ -45,6 +46,7 @@ class RewardCalculatorV7:
         self.price_history.clear()
         self.peak_value = initial_value
         self.total_trades = 0
+        self.steps_since_trade = 0
         self.prev_portfolio_value = initial_value
 
     def calculate(
@@ -84,9 +86,12 @@ class RewardCalculatorV7:
 
         if action_change > 0.05:
             self.total_trades += 1
+            self.steps_since_trade = 0
             if raw_return > 0.001:
                 profit_bonus = 0.1
-        elif raw_return > 0 and abs(action) > 0.3:
+        else:
+            self.steps_since_trade += 1
+        if action_change <= 0.05 and raw_return > 0 and abs(action) > 0.3:
             # 수익 중인 포지션 유지 → 보너스
             holding_bonus = 0.05
 

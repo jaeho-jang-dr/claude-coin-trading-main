@@ -7,8 +7,13 @@ venv/
 data/charts/*.png
 data/snapshots/
 data/tavily_usage.json
-logs/executions/
-logs/claude_responses/
+data/rl_models/
+data/training_results/
+data/training_history.json
+data/agent_state.json
+data/trading.lock
+data/auto_emergency.json
+logs/
 
 # === Supabase 로컬 설정 ===
 supabase/.temp/

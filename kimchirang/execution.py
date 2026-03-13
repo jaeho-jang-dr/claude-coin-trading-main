@@ -4,22 +4,30 @@
   1. Upbit Spot + Binance Futures를 asyncio.gather()로 동시 실행
   2. 한쪽 실패 시 다른 쪽 긴급 청산 (레그 리스크 방지)
   3. DRY_RUN 모드에서는 실제 주문 없이 시뮬레이션
+  4. API 호출 실패 시 config.trading.retry_count 만큼 재시도
 """
 
 import asyncio
+import hashlib
+import hmac
 import logging
 import time
+import urllib.parse
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
 import aiohttp
+import jwt
 
 from kimchirang.config import KimchirangConfig
 from kimchirang.kp_engine import KPSnapshot
 
 logger = logging.getLogger("kimchirang.execution")
+
+# 재시도하면 안 되는 HTTP 상태 코드 (클라이언트 오류)
+_NON_RETRYABLE_STATUS = {400, 401, 403, 404, 422}
 
 
 class PositionSide(Enum):
@@ -135,9 +143,12 @@ class Executor:
     def __init__(self, config: KimchirangConfig):
         self.config = config
         self._session: Optional[aiohttp.ClientSession] = None
+        # Binance 서버 시간 오프셋 (ms) — sync_server_time()으로 갱신
+        self._binance_time_offset: int = 0
 
         # 포지션 영속성: 파일에서 복원
-        from kimchirang.state import load_position
+        from kimchirang.state import load_position, save_position
+        self._save_position_fn = save_position
         saved = load_position()
         self.position = PositionState.from_dict(saved)
 
@@ -151,6 +162,30 @@ class Executor:
     async def close(self):
         if self._session and not self._session.closed:
             await self._session.close()
+
+    def _binance_timestamp(self) -> str:
+        """Binance 서버 시간 보정된 타임스탬프 (ms)"""
+        return str(int(time.time() * 1000) + self._binance_time_offset)
+
+    async def sync_server_time(self) -> bool:
+        """Binance 서버 시간과 로컬 시간 차이를 측정하여 오프셋 저장"""
+        try:
+            session = await self._get_session()
+            async with session.get(
+                f"{self.config.binance.rest_url}/fapi/v1/time"
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    server_time = data["serverTime"]
+                    local_time = int(time.time() * 1000)
+                    self._binance_time_offset = server_time - local_time
+                    logger.info(
+                        f"Binance 시간 동기화 완료 (오프셋: {self._binance_time_offset}ms)"
+                    )
+                    return True
+        except Exception as e:
+            logger.warning(f"Binance 시간 동기화 실패: {e}")
+        return False
 
     # ============================================================
     # 안전장치 체크
@@ -229,9 +264,9 @@ class Executor:
             )
             logger.info(f"[DRY RUN] 진입 시뮬레이션: {btc_qty:.8f} BTC, KP={snapshot.entry_kp:.2f}%")
         else:
-            # 실제 주문: 동시 실행
-            upbit_task = self._upbit_market_order("buy", btc_qty, trade_krw)
-            binance_task = self._binance_futures_order("sell", btc_qty)
+            # 실제 주문: 동시 실행 (retry 포함)
+            upbit_task = self._upbit_market_order_with_retry("buy", btc_qty, trade_krw)
+            binance_task = self._binance_futures_order_with_retry("sell", btc_qty)
 
             upbit_result, binance_result = await asyncio.gather(
                 upbit_task, binance_task, return_exceptions=True
@@ -305,8 +340,8 @@ class Executor:
             pnl = self._calculate_pnl(result, snapshot)
             logger.info(f"[DRY RUN] 청산 시뮬레이션: PnL={pnl:+.2f}%, KP={snapshot.exit_kp:.2f}%")
         else:
-            upbit_task = self._upbit_market_order("sell", self.position.upbit_qty)
-            binance_task = self._binance_futures_order("buy", self.position.binance_qty)
+            upbit_task = self._upbit_market_order_with_retry("sell", self.position.upbit_qty)
+            binance_task = self._binance_futures_order_with_retry("buy", self.position.binance_qty)
 
             upbit_result, binance_result = await asyncio.gather(
                 upbit_task, binance_task, return_exceptions=True
@@ -323,6 +358,8 @@ class Executor:
         if result.both_success:
             pnl = self._calculate_pnl(result, snapshot)
             logger.info(f"청산 완료: PnL={pnl:+.2f}%, 보유시간={self.position.hold_duration_min:.1f}분")
+            # pnl을 result에 저장 (포지션 초기화 후에도 참조 가능)
+            result._cached_pnl = pnl
             # 포지션 초기화
             self.position.side = PositionSide.NONE
             self.position.entry_kp = 0
@@ -336,6 +373,83 @@ class Executor:
         return result
 
     # ============================================================
+    # Retry 래퍼
+    # ============================================================
+
+    async def _upbit_market_order_with_retry(
+        self, side: str, qty: float, total_krw: float = None
+    ) -> dict:
+        """Upbit 주문 + 재시도 (config.trading.retry_count)"""
+        max_retries = self.config.trading.retry_count
+        last_error = None
+        for attempt in range(max_retries + 1):
+            try:
+                result = await self._upbit_market_order(side, qty, total_krw)
+                if result.get("success"):
+                    return result
+                # API가 응답했지만 실패인 경우
+                error_str = result.get("error", "")
+                # 재시도 불가능한 오류 (잔고 부족, 인증 실패 등)
+                if any(code in error_str for code in ["insufficient", "401", "403"]):
+                    logger.error(f"Upbit 주문 실패 (재시도 불가): {error_str}")
+                    return result
+                last_error = error_str
+            except asyncio.TimeoutError:
+                last_error = "타임아웃"
+                logger.warning(f"Upbit 주문 타임아웃 (시도 {attempt + 1}/{max_retries + 1})")
+            except aiohttp.ClientError as e:
+                last_error = str(e)
+                logger.warning(f"Upbit 주문 네트워크 오류 (시도 {attempt + 1}/{max_retries + 1}): {e}")
+            except Exception as e:
+                last_error = str(e)
+                logger.error(f"Upbit 주문 예상치 못한 오류: {type(e).__name__}: {e}")
+                return {"success": False, "error": last_error}
+
+            if attempt < max_retries:
+                delay = 0.5 * (2 ** attempt)  # 0.5s, 1s, 2s...
+                logger.info(f"Upbit 주문 재시도 대기 {delay:.1f}초")
+                await asyncio.sleep(delay)
+
+        return {"success": False, "error": f"재시도 {max_retries}회 실패: {last_error}"}
+
+    async def _binance_futures_order_with_retry(
+        self, side: str, qty: float
+    ) -> dict:
+        """Binance Futures 주문 + 재시도 (config.trading.retry_count)"""
+        max_retries = self.config.trading.retry_count
+        last_error = None
+        for attempt in range(max_retries + 1):
+            try:
+                result = await self._binance_futures_order(side, qty)
+                if result.get("success"):
+                    return result
+                error_str = result.get("error", "")
+                # 재시도 불가능한 오류
+                if any(code in error_str for code in [
+                    "insufficient", "-2019", "-2015", "-1013"
+                ]):
+                    logger.error(f"Binance 주문 실패 (재시도 불가): {error_str}")
+                    return result
+                last_error = error_str
+            except asyncio.TimeoutError:
+                last_error = "타임아웃"
+                logger.warning(f"Binance 주문 타임아웃 (시도 {attempt + 1}/{max_retries + 1})")
+            except aiohttp.ClientError as e:
+                last_error = str(e)
+                logger.warning(f"Binance 주문 네트워크 오류 (시도 {attempt + 1}/{max_retries + 1}): {e}")
+            except Exception as e:
+                last_error = str(e)
+                logger.error(f"Binance 주문 예상치 못한 오류: {type(e).__name__}: {e}")
+                return {"success": False, "error": last_error}
+
+            if attempt < max_retries:
+                delay = 0.5 * (2 ** attempt)
+                logger.info(f"Binance 주문 재시도 대기 {delay:.1f}초")
+                await asyncio.sleep(delay)
+
+        return {"success": False, "error": f"재시도 {max_retries}회 실패: {last_error}"}
+
+    # ============================================================
     # Upbit REST API
     # ============================================================
 
@@ -346,9 +460,6 @@ class Executor:
         매수: total_krw 기준 (원화 기준 시장가)
         매도: qty 기준 (BTC 수량 기준 시장가)
         """
-        import jwt
-        import hashlib
-
         access_key = self.config.upbit.access_key
         secret_key = self.config.upbit.secret_key
 
@@ -385,7 +496,9 @@ class Executor:
             data = await resp.json()
             if resp.status in (200, 201):
                 return {"success": True, "data": data}
-            return {"success": False, "error": str(data)}
+            if resp.status == 429:
+                logger.warning("Upbit API Rate limit (429)")
+            return {"success": False, "error": f"HTTP {resp.status}: {str(data)[:200]}"}
 
     # ============================================================
     # Binance Futures REST API
@@ -393,10 +506,6 @@ class Executor:
 
     async def _binance_futures_order(self, side: str, qty: float) -> dict:
         """Binance USDM Futures 시장가 주문"""
-        import hashlib
-        import hmac
-        import urllib.parse
-
         api_key = self.config.binance.api_key
         api_secret = self.config.binance.api_secret
 
@@ -405,7 +514,7 @@ class Executor:
             "side": "SELL" if side == "sell" else "BUY",
             "type": "MARKET",
             "quantity": f"{qty:.3f}",
-            "timestamp": str(int(time.time() * 1000)),
+            "timestamp": self._binance_timestamp(),
         }
 
         query_string = urllib.parse.urlencode(params)
@@ -423,18 +532,20 @@ class Executor:
             data = await resp.json()
             if resp.status == 200:
                 return {"success": True, "data": data}
-            return {"success": False, "error": str(data)}
+            if resp.status == 429:
+                logger.warning("Binance API Rate limit (429)")
+            return {"success": False, "error": f"HTTP {resp.status}: {str(data)[:200]}"}
 
     # ============================================================
     # 헬퍼
     # ============================================================
 
     def _parse_leg_result(self, exchange: str, side: str, raw) -> LegResult:
-        """API 응답 → LegResult 변환"""
+        """API 응답 -> LegResult 변환"""
         if isinstance(raw, Exception):
             return LegResult(
                 exchange=exchange, success=False, side=side,
-                error=str(raw),
+                error=f"{type(raw).__name__}: {raw}",
             )
         if not isinstance(raw, dict):
             return LegResult(
@@ -444,19 +555,25 @@ class Executor:
 
         if raw.get("success"):
             data = raw.get("data", {})
-            if exchange == "upbit":
+            try:
+                if exchange == "upbit":
+                    return LegResult(
+                        exchange=exchange, success=True, side=side,
+                        order_id=data.get("uuid", ""),
+                        filled_price=float(data.get("price", 0) or data.get("avg_price", 0)),
+                        filled_qty=float(data.get("executed_volume", 0)),
+                    )
+                else:  # binance
+                    return LegResult(
+                        exchange=exchange, success=True, side=side,
+                        order_id=str(data.get("orderId", "")),
+                        filled_price=float(data.get("avgPrice", 0)),
+                        filled_qty=float(data.get("executedQty", 0)),
+                    )
+            except (ValueError, TypeError) as e:
                 return LegResult(
-                    exchange=exchange, success=True, side=side,
-                    order_id=data.get("uuid", ""),
-                    filled_price=float(data.get("price", 0) or data.get("avg_price", 0)),
-                    filled_qty=float(data.get("executed_volume", 0)),
-                )
-            else:  # binance
-                return LegResult(
-                    exchange=exchange, success=True, side=side,
-                    order_id=str(data.get("orderId", "")),
-                    filled_price=float(data.get("avgPrice", 0)),
-                    filled_qty=float(data.get("executedQty", 0)),
+                    exchange=exchange, success=False, side=side,
+                    error=f"응답 파싱 오류: {e}",
                 )
         return LegResult(
             exchange=exchange, success=False, side=side,
@@ -464,26 +581,51 @@ class Executor:
         )
 
     async def _emergency_unwind(self, result: ExecutionResult):
-        """한쪽 레그만 성공한 경우 긴급 청산"""
+        """한쪽 레그만 성공한 경우 긴급 청산 (재시도 포함)
+
+        이 함수는 치명적이므로 최대한 성공시켜야 한다.
+        config.retry_count와 별도로 최소 3회 재시도한다.
+        """
         logger.error(f"PARTIAL FILL -- 긴급 청산 시작: {result.summary()}")
+        max_unwind_retries = max(3, self.config.trading.retry_count)
 
         if result.upbit_leg.success and not result.binance_leg.success:
             # Upbit만 성공 -> Upbit 반대매매
             side = "sell" if result.upbit_leg.side == "buy" else "buy"
-            try:
-                await self._upbit_market_order(side, result.upbit_leg.filled_qty)
-                logger.info("긴급 Upbit 반대매매 완료")
-            except Exception as e:
-                logger.error(f"긴급 Upbit 반대매매 실패: {e}")
+            for attempt in range(max_unwind_retries):
+                try:
+                    unwind = await self._upbit_market_order(side, result.upbit_leg.filled_qty)
+                    if unwind.get("success"):
+                        logger.info("긴급 Upbit 반대매매 완료")
+                        return
+                    logger.error(f"긴급 Upbit 반대매매 실패 (시도 {attempt + 1}): {unwind.get('error')}")
+                except Exception as e:
+                    logger.error(f"긴급 Upbit 반대매매 예외 (시도 {attempt + 1}): {e}")
+                if attempt < max_unwind_retries - 1:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+            logger.critical(
+                f"긴급 Upbit 반대매매 {max_unwind_retries}회 실패 -- "
+                f"수동 청산 필요! qty={result.upbit_leg.filled_qty}"
+            )
 
         elif result.binance_leg.success and not result.upbit_leg.success:
             # Binance만 성공 -> Binance 반대매매
             side = "buy" if result.binance_leg.side == "sell" else "sell"
-            try:
-                await self._binance_futures_order(side, result.binance_leg.filled_qty)
-                logger.info("긴급 Binance 반대매매 완료")
-            except Exception as e:
-                logger.error(f"긴급 Binance 반대매매 실패: {e}")
+            for attempt in range(max_unwind_retries):
+                try:
+                    unwind = await self._binance_futures_order(side, result.binance_leg.filled_qty)
+                    if unwind.get("success"):
+                        logger.info("긴급 Binance 반대매매 완료")
+                        return
+                    logger.error(f"긴급 Binance 반대매매 실패 (시도 {attempt + 1}): {unwind.get('error')}")
+                except Exception as e:
+                    logger.error(f"긴급 Binance 반대매매 예외 (시도 {attempt + 1}): {e}")
+                if attempt < max_unwind_retries - 1:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+            logger.critical(
+                f"긴급 Binance 반대매매 {max_unwind_retries}회 실패 -- "
+                f"수동 청산 필요! qty={result.binance_leg.filled_qty}"
+            )
 
     def _calculate_pnl(self, result: ExecutionResult, snapshot: KPSnapshot) -> float:
         """수익률 계산 (%)
@@ -498,52 +640,64 @@ class Executor:
 
     def _save_state(self):
         """포지션 상태를 파일에 저장"""
-        from kimchirang.state import save_position
-        save_position(self.position.to_dict())
+        try:
+            self._save_position_fn(self.position.to_dict())
+        except Exception as e:
+            logger.error(f"포지션 상태 저장 실패 (치명적 아님): {e}")
 
     async def set_leverage(self) -> bool:
-        """Binance Futures 레버리지 설정 (봇 시작 시 1회 호출)"""
+        """Binance Futures 레버리지 설정 (봇 시작 시 1회 호출, 재시도 포함)"""
         leverage = self.config.trading.leverage
 
         if self.config.trading.dry_run:
             logger.info(f"[DRY RUN] 레버리지 {leverage}x 설정 (시뮬)")
             return True
 
-        import hashlib
-        import hmac
-        import urllib.parse
-
         api_key = self.config.binance.api_key
         api_secret = self.config.binance.api_secret
 
-        params = {
-            "symbol": self.config.trading.binance_futures_symbol,
-            "leverage": str(leverage),
-            "timestamp": str(int(time.time() * 1000)),
-        }
+        max_retries = self.config.trading.retry_count
+        for attempt in range(max_retries + 1):
+            try:
+                params = {
+                    "symbol": self.config.trading.binance_futures_symbol,
+                    "leverage": str(leverage),
+                    "timestamp": self._binance_timestamp(),
+                }
 
-        query_string = urllib.parse.urlencode(params)
-        signature = hmac.new(
-            api_secret.encode(), query_string.encode(), hashlib.sha256
-        ).hexdigest()
-        params["signature"] = signature
+                query_string = urllib.parse.urlencode(params)
+                signature = hmac.new(
+                    api_secret.encode(), query_string.encode(), hashlib.sha256
+                ).hexdigest()
+                params["signature"] = signature
 
-        try:
-            session = await self._get_session()
-            async with session.post(
-                f"{self.config.binance.rest_url}/fapi/v1/leverage",
-                headers={"X-MBX-APIKEY": api_key},
-                params=params,
-            ) as resp:
-                data = await resp.json()
-                if resp.status == 200:
-                    logger.info(f"Binance 레버리지 {leverage}x 설정 완료")
-                    return True
-                logger.error(f"Binance 레버리지 설정 실패: {data}")
-                return False
-        except Exception as e:
-            logger.error(f"Binance 레버리지 설정 오류: {e}")
-            return False
+                session = await self._get_session()
+                async with session.post(
+                    f"{self.config.binance.rest_url}/fapi/v1/leverage",
+                    headers={"X-MBX-APIKEY": api_key},
+                    params=params,
+                ) as resp:
+                    data = await resp.json()
+                    if resp.status == 200:
+                        logger.info(f"Binance 레버리지 {leverage}x 설정 완료")
+                        return True
+                    if resp.status in _NON_RETRYABLE_STATUS:
+                        logger.error(f"Binance 레버리지 설정 실패 (재시도 불가): {data}")
+                        return False
+                    logger.warning(
+                        f"Binance 레버리지 설정 실패 "
+                        f"(시도 {attempt + 1}/{max_retries + 1}): {data}"
+                    )
+            except asyncio.TimeoutError:
+                logger.warning(f"Binance 레버리지 설정 타임아웃 (시도 {attempt + 1})")
+            except Exception as e:
+                logger.error(f"Binance 레버리지 설정 오류: {e}")
+
+            if attempt < max_retries:
+                await asyncio.sleep(1.0 * (attempt + 1))
+
+        logger.error(f"Binance 레버리지 설정 {max_retries + 1}회 실패")
+        return False
 
     def get_position_info(self) -> dict:
         """현재 포지션 정보"""

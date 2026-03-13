@@ -7,6 +7,7 @@ Upbit (호가/체결), Binance Futures (호가/체결/펀딩비), USD/KRW 환율
 import asyncio
 import json
 import logging
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -41,7 +42,7 @@ class OrderBook:
 
     @property
     def spread_pct(self) -> float:
-        if self.best_bid > 0:
+        if self.best_bid > 0 and self.best_ask > 0:
             return (self.best_ask - self.best_bid) / self.best_bid * 100
         return 0.0
 
@@ -105,29 +106,77 @@ class MarketState:
 
 
 # ============================================================
+# 데이터 유효성 검증 헬퍼
+# ============================================================
+
+def _is_valid_price(price, min_val: float = 0.0, max_val: float = float("inf")) -> bool:
+    """가격 데이터 유효성 검증: NaN, Inf, 음수, 극단값 필터링"""
+    if price is None:
+        return False
+    try:
+        f = float(price)
+        if math.isnan(f) or math.isinf(f):
+            return False
+        return min_val < f < max_val
+    except (TypeError, ValueError):
+        return False
+
+
+# ============================================================
 # Upbit WebSocket Feeder
 # ============================================================
 
 class UpbitFeeder:
     """Upbit 실시간 호가 + 체결 스트림"""
 
+    MAX_RECONNECT_DELAY = 60
+    MAX_RECONNECT_ATTEMPTS = 50  # 약 30분 분량 (backoff 누적)
+
     def __init__(self, config: KimchirangConfig, state: MarketState):
         self.config = config
         self.state = state
         self._running = False
-        self._reconnect_delay = 1
+        self._reconnect_delay = 1.0
+        self._reconnect_attempts = 0
 
     async def run(self):
-        """WebSocket 연결 유지 (자동 재연결)"""
+        """WebSocket 연결 유지 (자동 재연결 + exponential backoff + 최대 재시도)"""
         self._running = True
         while self._running:
             try:
                 await self._connect()
+            except asyncio.CancelledError:
+                raise
+            except (websockets.ConnectionClosed, websockets.InvalidURI,
+                    websockets.InvalidHandshake) as e:
+                logger.warning(f"Upbit WS 연결 끊김 (재연결 예정): {e}")
+            except OSError as e:
+                logger.error(f"Upbit WS 네트워크 오류: {e}")
             except Exception as e:
-                logger.error(f"Upbit WS 오류: {e}")
+                logger.error(f"Upbit WS 예상치 못한 오류: {type(e).__name__}: {e}")
+            finally:
                 self.state.upbit_connected = False
-                await asyncio.sleep(min(self._reconnect_delay, 30))
-                self._reconnect_delay *= 2
+                self.state.upbit_orderbook = OrderBook()
+                self.state.upbit_ticker = TickerData()
+
+            if self._running:
+                self._reconnect_attempts += 1
+                if self._reconnect_attempts > self.MAX_RECONNECT_ATTEMPTS:
+                    logger.error(
+                        f"Upbit WS 재연결 {self.MAX_RECONNECT_ATTEMPTS}회 초과 "
+                        "-- 60초 대기 후 카운터 리셋"
+                    )
+                    await asyncio.sleep(60)
+                    self._reconnect_attempts = 0
+                    self._reconnect_delay = 1.0
+                    continue
+                delay = min(self._reconnect_delay, self.MAX_RECONNECT_DELAY)
+                logger.info(
+                    f"Upbit WS 재연결 대기 {delay:.0f}초 "
+                    f"(시도 {self._reconnect_attempts}/{self.MAX_RECONNECT_ATTEMPTS})"
+                )
+                await asyncio.sleep(delay)
+                self._reconnect_delay = min(self._reconnect_delay * 2, self.MAX_RECONNECT_DELAY)
 
     async def _connect(self):
         symbol = self.config.trading.upbit_symbol
@@ -146,7 +195,8 @@ class UpbitFeeder:
         ) as ws:
             await ws.send(json.dumps(subscribe_msg))
             self.state.upbit_connected = True
-            self._reconnect_delay = 1
+            self._reconnect_delay = 1.0
+            self._reconnect_attempts = 0
             logger.info(f"Upbit WS 연결 완료: {symbol}")
 
             async for raw in ws:
@@ -154,6 +204,10 @@ class UpbitFeeder:
                     data = json.loads(raw)
                     self._handle_message(data)
                 except json.JSONDecodeError:
+                    logger.debug("Upbit WS: JSON 파싱 실패 (무시)")
+                    continue
+                except (ValueError, TypeError, KeyError) as e:
+                    logger.warning(f"Upbit WS 메시지 처리 오류 (무시): {e}")
                     continue
 
     def _handle_message(self, data: dict):
@@ -164,21 +218,30 @@ class UpbitFeeder:
             units = data.get("obu", [])
             if units:
                 top = units[0]
-                self.state.upbit_orderbook = OrderBook(
-                    best_bid=float(top.get("bp", 0)),
-                    best_ask=float(top.get("ap", 0)),
-                    bid_qty=float(top.get("bs", 0)),
-                    ask_qty=float(top.get("as", 0)),
-                    timestamp=now,
-                )
+                bid = float(top.get("bp", 0))
+                ask = float(top.get("ap", 0))
+                # 유효성 검증: KRW 가격은 양수이고 합리적 범위여야 함
+                if not _is_valid_price(bid, min_val=1000) or not _is_valid_price(ask, min_val=1000):
+                    logger.warning(f"Upbit 호가 비정상 값 무시: bid={bid}, ask={ask}")
+                    return
+                if ask < bid:
+                    logger.warning(f"Upbit 호가 역전 무시: bid={bid} > ask={ask}")
+                    return
+                ob = self.state.upbit_orderbook
+                ob.best_bid = bid
+                ob.best_ask = ask
+                ob.bid_qty = max(0.0, float(top.get("bs", 0)))
+                ob.ask_qty = max(0.0, float(top.get("as", 0)))
+                ob.timestamp = now
 
         elif msg_type == "ticker":
-            self.state.upbit_ticker = TickerData(
-                last_price=float(data.get("tp", 0)),
-                volume_24h=float(data.get("atv24h", 0)),
-                change_pct_24h=float(data.get("scr", 0)) * 100,
-                timestamp=now,
-            )
+            price = float(data.get("tp", 0))
+            if _is_valid_price(price, min_val=1000):
+                tk = self.state.upbit_ticker
+                tk.last_price = price
+                tk.volume_24h = max(0.0, float(data.get("atv24h", 0)))
+                tk.change_pct_24h = float(data.get("scr", 0)) * 100
+                tk.timestamp = now
 
     def stop(self):
         self._running = False
@@ -191,28 +254,61 @@ class UpbitFeeder:
 class BinanceFeeder:
     """Binance USDM Futures 실시간 호가 + 체결 + 마크 가격 스트림"""
 
+    MAX_RECONNECT_DELAY = 60
+    MAX_RECONNECT_ATTEMPTS = 50
+
     def __init__(self, config: KimchirangConfig, state: MarketState):
         self.config = config
         self.state = state
         self._running = False
-        self._reconnect_delay = 1
+        self._reconnect_delay = 1.0
+        self._reconnect_attempts = 0
 
     async def run(self):
         self._running = True
         while self._running:
             try:
                 await self._connect()
+            except asyncio.CancelledError:
+                raise
+            except (websockets.ConnectionClosed, websockets.InvalidURI,
+                    websockets.InvalidHandshake) as e:
+                logger.warning(f"Binance WS 연결 끊김 (재연결 예정): {e}")
+            except OSError as e:
+                logger.error(f"Binance WS 네트워크 오류: {e}")
             except Exception as e:
-                logger.error(f"Binance WS 오류: {e}")
+                logger.error(f"Binance WS 예상치 못한 오류: {type(e).__name__}: {e}")
+            finally:
                 self.state.binance_connected = False
-                await asyncio.sleep(min(self._reconnect_delay, 30))
-                self._reconnect_delay *= 2
+                self.state.binance_orderbook = OrderBook()
+                self.state.binance_ticker = TickerData()
+                self.state.binance_funding = FundingData()
+
+            if self._running:
+                self._reconnect_attempts += 1
+                if self._reconnect_attempts > self.MAX_RECONNECT_ATTEMPTS:
+                    logger.error(
+                        f"Binance WS 재연결 {self.MAX_RECONNECT_ATTEMPTS}회 초과 "
+                        "-- 60초 대기 후 카운터 리셋"
+                    )
+                    await asyncio.sleep(60)
+                    self._reconnect_attempts = 0
+                    self._reconnect_delay = 1.0
+                    continue
+                delay = min(self._reconnect_delay, self.MAX_RECONNECT_DELAY)
+                logger.info(
+                    f"Binance WS 재연결 대기 {delay:.0f}초 "
+                    f"(시도 {self._reconnect_attempts}/{self.MAX_RECONNECT_ATTEMPTS})"
+                )
+                await asyncio.sleep(delay)
+                self._reconnect_delay = min(self._reconnect_delay * 2, self.MAX_RECONNECT_DELAY)
 
     async def _connect(self):
         symbol_lower = self.config.trading.binance_futures_symbol.lower()
         # Combined stream: bookTicker(최우선호가) + ticker + markPrice
         streams = f"{symbol_lower}@bookTicker/{symbol_lower}@ticker/{symbol_lower}@markPrice"
-        url = f"{self.config.binance.ws_url}/{streams}"
+        base_url = self.config.binance.ws_url.replace("/ws", "/stream", 1)
+        url = f"{base_url}?streams={streams}"
 
         async with websockets.connect(
             url,
@@ -221,45 +317,62 @@ class BinanceFeeder:
             close_timeout=5,
         ) as ws:
             self.state.binance_connected = True
-            self._reconnect_delay = 1
+            self._reconnect_delay = 1.0
+            self._reconnect_attempts = 0
             logger.info(f"Binance Futures WS 연결 완료: {symbol_lower}")
 
             async for raw in ws:
                 try:
                     msg = json.loads(raw)
-                    # Combined stream format: {"stream": "...", "data": {...}}
                     data = msg.get("data", msg)
                     event = data.get("e", "")
                     self._handle_message(event, data)
                 except json.JSONDecodeError:
+                    logger.debug("Binance WS: JSON 파싱 실패 (무시)")
+                    continue
+                except (ValueError, TypeError, KeyError) as e:
+                    logger.warning(f"Binance WS 메시지 처리 오류 (무시): {e}")
                     continue
 
     def _handle_message(self, event: str, data: dict):
         now = time.time()
 
         if event == "bookTicker":
-            self.state.binance_orderbook = OrderBook(
-                best_bid=float(data.get("b", 0)),
-                best_ask=float(data.get("a", 0)),
-                bid_qty=float(data.get("B", 0)),
-                ask_qty=float(data.get("A", 0)),
-                timestamp=now,
-            )
+            bid = float(data.get("b", 0))
+            ask = float(data.get("a", 0))
+            # USDT 가격 유효성 검증
+            if not _is_valid_price(bid, min_val=100) or not _is_valid_price(ask, min_val=100):
+                logger.warning(f"Binance 호가 비정상 값 무시: bid={bid}, ask={ask}")
+                return
+            if ask < bid:
+                logger.warning(f"Binance 호가 역전 무시: bid={bid} > ask={ask}")
+                return
+            ob = self.state.binance_orderbook
+            ob.best_bid = bid
+            ob.best_ask = ask
+            ob.bid_qty = max(0.0, float(data.get("B", 0)))
+            ob.ask_qty = max(0.0, float(data.get("A", 0)))
+            ob.timestamp = now
 
         elif event == "24hrTicker":
-            self.state.binance_ticker = TickerData(
-                last_price=float(data.get("c", 0)),
-                volume_24h=float(data.get("v", 0)),
-                change_pct_24h=float(data.get("P", 0)),
-                timestamp=now,
-            )
+            price = float(data.get("c", 0))
+            if _is_valid_price(price, min_val=100):
+                tk = self.state.binance_ticker
+                tk.last_price = price
+                tk.volume_24h = max(0.0, float(data.get("v", 0)))
+                tk.change_pct_24h = float(data.get("P", 0))
+                tk.timestamp = now
 
         elif event == "markPriceUpdate":
-            self.state.binance_funding = FundingData(
-                funding_rate=float(data.get("r", 0)),
-                next_funding_time=int(data.get("T", 0)),
-                timestamp=now,
-            )
+            funding_rate = float(data.get("r", 0))
+            # 펀딩비 합리성 체크: 보통 -0.75% ~ +0.75% 범위
+            if abs(funding_rate) > 0.01:
+                logger.warning(f"Binance 펀딩비 이상값 무시: {funding_rate}")
+                return
+            fd = self.state.binance_funding
+            fd.funding_rate = funding_rate
+            fd.next_funding_time = int(data.get("T", 0))
+            fd.timestamp = now
 
     def stop(self):
         self._running = False
@@ -272,70 +385,115 @@ class BinanceFeeder:
 class FXFeeder:
     """USD/KRW 환율 주기적 갱신"""
 
-    # 무료 환율 API 우선순위
-    FX_SOURCES = [
-        # 한국수출입은행 API (공식, 영업일만)
-        "https://www.koreaexim.go.kr/site/program/financial/exchangeJSON?authkey={authkey}&data=AP01&searchdate={date}",
-        # 대체: exchangerate-api.com
-        "https://open.er-api.com/v6/latest/USD",
-        # 대체: 고정 fallback (비상용)
-    ]
+    # 환율 합리성 범위 (KRW/USD)
+    FX_MIN = 900.0
+    FX_MAX = 2000.0
+    # 기존 값 유지 최대 시간 (초)
+    FX_STALE_TIMEOUT = 600
+    # 연속 실패 허용 횟수
+    MAX_CONSECUTIVE_FAILURES = 10
 
     def __init__(self, config: KimchirangConfig, state: MarketState):
         self.config = config
         self.state = state
         self._running = False
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._consecutive_failures = 0
 
     async def run(self):
         self._running = True
-        while self._running:
-            try:
-                rate = await self._fetch_rate()
-                if rate and rate > 1000:  # 합리성 체크
-                    self.state.fx_rate = rate
-                    self.state.fx_updated_at = time.time()
-                    self.state.fx_available = True
-                    logger.info(f"USD/KRW 환율 갱신: {rate:,.2f}")
-                else:
-                    logger.warning(f"비정상 환율: {rate}")
-            except Exception as e:
-                logger.error(f"FX Rate 갱신 실패: {e}")
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=15)
+        )
+        try:
+            while self._running:
+                try:
+                    rate = await self._fetch_rate()
+                    if rate and self.FX_MIN < rate < self.FX_MAX:
+                        # 기존 값 대비 급변 체크 (5% 이상 변동은 의심)
+                        if (self.state.fx_rate > 0
+                                and abs(rate - self.state.fx_rate) / self.state.fx_rate > 0.05):
+                            logger.warning(
+                                f"FX Rate 급변 감지: {self.state.fx_rate:.2f} -> {rate:.2f} (무시)"
+                            )
+                        else:
+                            self.state.fx_rate = rate
+                            self.state.fx_updated_at = time.time()
+                            self.state.fx_available = True
+                            self._consecutive_failures = 0
+                            logger.info(f"USD/KRW 환율 갱신: {rate:,.2f}")
+                    else:
+                        self._consecutive_failures += 1
+                        logger.warning(
+                            f"비정상 환율: {rate} "
+                            f"(연속실패 {self._consecutive_failures}/{self.MAX_CONSECUTIVE_FAILURES})"
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    self._consecutive_failures += 1
+                    logger.error(
+                        f"FX Rate 갱신 실패: {e} "
+                        f"(연속실패 {self._consecutive_failures}/{self.MAX_CONSECUTIVE_FAILURES})"
+                    )
 
-            await asyncio.sleep(self.config.trading.fx_update_interval_sec)
+                if self._consecutive_failures >= self.MAX_CONSECUTIVE_FAILURES:
+                    logger.error(
+                        f"FX Rate {self.MAX_CONSECUTIVE_FAILURES}회 연속 실패 "
+                        "-- fx_available=False 설정"
+                    )
+                    if time.time() - self.state.fx_updated_at > self.FX_STALE_TIMEOUT:
+                        self.state.fx_available = False
+
+                await asyncio.sleep(self.config.trading.fx_update_interval_sec)
+        finally:
+            if self._session and not self._session.closed:
+                await self._session.close()
+            self._session = None
 
     async def _fetch_rate(self) -> Optional[float]:
         """여러 소스에서 USD/KRW 환율 조회"""
+        session = self._session
+        if session is None or session.closed:
+            return None
+
         # 소스 1: exchangerate-api (무료, 안정적)
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    "https://open.er-api.com/v6/latest/USD",
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        rate = data.get("rates", {}).get("KRW")
-                        if rate:
-                            return float(rate)
+            async with session.get(
+                "https://open.er-api.com/v6/latest/USD",
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    rate = data.get("rates", {}).get("KRW")
+                    if rate:
+                        return float(rate)
+                elif resp.status == 429:
+                    logger.warning("FX 소스1 Rate limit (429)")
+                else:
+                    logger.debug(f"FX 소스1 HTTP {resp.status}")
+        except asyncio.TimeoutError:
+            logger.debug("FX 소스1 타임아웃")
         except Exception as e:
             logger.debug(f"FX 소스1 실패: {e}")
 
         # 소스 2: Upbit USDT/KRW (크립토 기준, 근사)
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    "https://api.upbit.com/v1/ticker?markets=KRW-USDT",
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data and isinstance(data, list):
-                            return float(data[0].get("trade_price", 0))
+            async with session.get(
+                "https://api.upbit.com/v1/ticker?markets=KRW-USDT",
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data and isinstance(data, list):
+                        price = float(data[0].get("trade_price", 0))
+                        if price > 0:
+                            return price
+        except asyncio.TimeoutError:
+            logger.debug("FX 소스2 타임아웃")
         except Exception as e:
             logger.debug(f"FX 소스2 실패: {e}")
 
-        # 소스 3: 기존 값 유지 (10분 이내)
-        if self.state.fx_rate > 0 and time.time() - self.state.fx_updated_at < 600:
+        # 소스 3: 기존 값 유지 (stale timeout 이내)
+        if self.state.fx_rate > 0 and time.time() - self.state.fx_updated_at < self.FX_STALE_TIMEOUT:
             logger.warning("FX Rate 갱신 실패 -- 기존 값 유지")
             return self.state.fx_rate
 
@@ -368,7 +526,18 @@ class DataFeeder:
             asyncio.create_task(self._binance.run(), name="binance_ws"),
             asyncio.create_task(self._fx.run(), name="fx_rate"),
         ]
+        # 피더 태스크 비정상 종료 감지
+        for task in self._tasks:
+            task.add_done_callback(self._on_task_done)
         logger.info("3개 피더 태스크 시작 완료")
+
+    def _on_task_done(self, task: asyncio.Task):
+        """피더 태스크가 예상치 못하게 종료되면 로깅"""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.error(f"피더 태스크 '{task.get_name()}' 비정상 종료: {exc}")
 
     async def stop(self):
         """모든 피더 정지"""
@@ -392,6 +561,10 @@ class DataFeeder:
                     f"FX: {self.state.fx_rate:,.2f} KRW/USD"
                 )
                 return True
+            # 피더 태스크가 전부 죽었으면 빠른 실패
+            if all(t.done() for t in self._tasks):
+                logger.error("모든 피더 태스크 종료됨 -- 데이터 준비 불가")
+                return False
             await asyncio.sleep(0.5)
         logger.error(f"데이터 준비 타임아웃 ({timeout}초)")
         return False

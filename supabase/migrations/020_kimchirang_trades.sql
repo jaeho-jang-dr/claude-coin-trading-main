@@ -1,7 +1,7 @@
 -- Kimchirang 차익거래 기록 테이블
 CREATE TABLE IF NOT EXISTS kimchirang_trades (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-  action TEXT NOT NULL CHECK (action IN ('enter', 'exit', 'stop_loss')),
+  action TEXT NOT NULL CHECK (action IN ('enter', 'exit', 'stop_loss', 'error')),
   kp_at_execution DECIMAL(8,4) NOT NULL,
   entry_kp DECIMAL(8,4),
   exit_kp DECIMAL(8,4),

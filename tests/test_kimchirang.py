@@ -15,11 +15,13 @@ PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
-from kimchirang.config import KimchirangConfig, TradingParams
+from kimchirang.config import KimchirangConfig, TradingParams, DBConfig
 from kimchirang.kp_engine import KPSnapshot, KPEngine
 from kimchirang.execution import (
     PositionSide, PositionState, LegResult, ExecutionResult, Executor,
 )
+from kimchirang.main import RLBridge, ACTION_HOLD, ACTION_ENTER, ACTION_EXIT
+from kimchirang.db import KimchirangDB
 
 
 # ============================================================
@@ -262,15 +264,23 @@ class TestStatePersistence:
         from kimchirang import state as st
         original_file = st.STATE_FILE
         original_lock = st.LOCK_FILE
+        original_backup_file = getattr(st, 'BACKUP_FILE', None)
+        original_memory = getattr(st, '_memory_backup', None)
 
         st.STATE_FILE = tmp_path / "nonexistent.json"
         st.LOCK_FILE = st.STATE_FILE.with_suffix(".lock")
+        st.BACKUP_FILE = st.STATE_FILE.with_suffix(".bak")
+        # 메모리 백업 초기화 (다른 테스트에서 오염 방지)
+        st._memory_backup = {}
         try:
             loaded = st.load_position()
             assert loaded["side"] == "none"
         finally:
             st.STATE_FILE = original_file
             st.LOCK_FILE = original_lock
+            if original_backup_file is not None:
+                st.BACKUP_FILE = original_backup_file
+            st._memory_backup = original_memory if original_memory else {}
 
 
 # ============================================================
@@ -327,11 +337,11 @@ class TestDB:
             "SUPABASE_SERVICE_ROLE_KEY": "test_key",
         }, clear=False):
             db = KimchirangDB(DBConfig())
+            mock_resp = MagicMock(status_code=201, text="")
+            db._session.post = MagicMock(return_value=mock_resp)
             result = ExecutionResult(action="enter", kp_at_execution=3.5)
-            with patch("kimchirang.db.requests.post") as mock_post:
-                mock_post.return_value = MagicMock(status_code=201, text="")
-                await db.record_trade(result, snapshot, stats={"mid_kp": 1.9})
-                mock_post.assert_called_once()
+            await db.record_trade(result, snapshot, stats={"mid_kp": 1.9})
+            db._session.post.assert_called_once()
 
 
 # ============================================================
@@ -369,3 +379,369 @@ class TestExecutionResult:
         assert "DRY" in s
         assert "ENTER" in s
         assert "OK" in s
+
+
+# ============================================================
+# RLBridge 앙상블 Tests
+# ============================================================
+
+class TestRLBridge:
+    """PPO + DQN 앙상블 RL 브릿지 테스트"""
+
+    def test_mode_rule_when_disabled(self, config):
+        config.rl.enabled = False
+        bridge = RLBridge(config)
+        bridge.load()
+        assert bridge.mode == "rule"
+        assert bridge.is_available is False
+
+    def test_mode_rule_no_models(self, config):
+        config.rl.enabled = True
+        bridge = RLBridge(config)
+        # load 없이도 rule 모드
+        assert bridge.mode == "rule"
+        assert bridge.is_available is False
+
+    def test_get_action_hold_when_unavailable(self, config):
+        bridge = RLBridge(config)
+        state = np.zeros(12)
+        assert bridge.get_action(state) == ACTION_HOLD
+
+    def test_mode_ppo_only(self, config):
+        config.rl.enabled = True
+        bridge = RLBridge(config)
+        mock_ppo = MagicMock()
+        mock_ppo.predict.return_value = (np.array(ACTION_ENTER), None)
+        bridge._ppo_model = mock_ppo
+        bridge._dqn_model = None
+        bridge._available = True
+        assert bridge.mode == "ppo"
+
+    def test_mode_dqn_only(self, config):
+        config.rl.enabled = True
+        bridge = RLBridge(config)
+        bridge._ppo_model = None
+        bridge._dqn_model = MagicMock()
+        bridge._available = True
+        assert bridge.mode == "dqn"
+
+    def test_mode_ensemble(self, config):
+        config.rl.enabled = True
+        bridge = RLBridge(config)
+        bridge._ppo_model = MagicMock()
+        bridge._dqn_model = MagicMock()
+        bridge._available = True
+        assert bridge.mode == "ensemble"
+
+    def test_ensemble_agree_enter(self, config):
+        """두 모델이 Enter에 합의하면 Enter"""
+        bridge = RLBridge(config)
+        ppo = MagicMock()
+        ppo.predict.return_value = (np.array(ACTION_ENTER), None)
+        dqn = MagicMock()
+        dqn.predict.return_value = (np.array(ACTION_ENTER), None)
+        bridge._ppo_model = ppo
+        bridge._dqn_model = dqn
+        bridge._available = True
+
+        state = np.zeros(12)
+        assert bridge.get_action(state) == ACTION_ENTER
+
+    def test_ensemble_agree_exit(self, config):
+        """두 모델이 Exit에 합의하면 Exit"""
+        bridge = RLBridge(config)
+        ppo = MagicMock()
+        ppo.predict.return_value = (np.array(ACTION_EXIT), None)
+        dqn = MagicMock()
+        dqn.predict.return_value = (np.array(ACTION_EXIT), None)
+        bridge._ppo_model = ppo
+        bridge._dqn_model = dqn
+        bridge._available = True
+
+        state = np.zeros(12)
+        assert bridge.get_action(state) == ACTION_EXIT
+
+    def test_ensemble_disagree_hold(self, config):
+        """두 모델이 불일치하면 Hold (신중)"""
+        bridge = RLBridge(config)
+        ppo = MagicMock()
+        ppo.predict.return_value = (np.array(ACTION_ENTER), None)
+        dqn = MagicMock()
+        dqn.predict.return_value = (np.array(ACTION_EXIT), None)
+        bridge._ppo_model = ppo
+        bridge._dqn_model = dqn
+        bridge._available = True
+
+        state = np.zeros(12)
+        assert bridge.get_action(state) == ACTION_HOLD
+
+    def test_ensemble_disagree_enter_vs_hold(self, config):
+        """Enter vs Hold 불일치 → Hold"""
+        bridge = RLBridge(config)
+        ppo = MagicMock()
+        ppo.predict.return_value = (np.array(ACTION_ENTER), None)
+        dqn = MagicMock()
+        dqn.predict.return_value = (np.array(ACTION_HOLD), None)
+        bridge._ppo_model = ppo
+        bridge._dqn_model = dqn
+        bridge._available = True
+
+        state = np.zeros(12)
+        assert bridge.get_action(state) == ACTION_HOLD
+
+    def test_single_ppo_action(self, config):
+        """PPO만 있으면 PPO 액션 그대로"""
+        bridge = RLBridge(config)
+        ppo = MagicMock()
+        ppo.predict.return_value = (np.array(ACTION_ENTER), None)
+        bridge._ppo_model = ppo
+        bridge._dqn_model = None
+        bridge._available = True
+
+        state = np.zeros(12)
+        assert bridge.get_action(state) == ACTION_ENTER
+
+    def test_single_dqn_action(self, config):
+        """DQN만 있으면 DQN 액션 그대로"""
+        bridge = RLBridge(config)
+        bridge._ppo_model = None
+        dqn = MagicMock()
+        dqn.predict.return_value = (np.array(ACTION_EXIT), None)
+        bridge._dqn_model = dqn
+        bridge._available = True
+
+        state = np.zeros(12)
+        assert bridge.get_action(state) == ACTION_EXIT
+
+    def test_predict_error_returns_none(self, config):
+        """모델 추론 실패 시 None → Hold"""
+        bridge = RLBridge(config)
+        ppo = MagicMock()
+        ppo.predict.side_effect = RuntimeError("inference failed")
+        bridge._ppo_model = ppo
+        bridge._dqn_model = None
+        bridge._available = True
+
+        state = np.zeros(12)
+        # _predict returns None for failed ppo, None for missing dqn → Hold
+        assert bridge.get_action(state) == ACTION_HOLD
+
+    def test_load_disabled(self, config):
+        """RL 비활성화 시 load() → False"""
+        config.rl.enabled = False
+        bridge = RLBridge(config)
+        result = bridge.load()
+        assert result is False
+        assert bridge.is_available is False
+
+
+# ============================================================
+# DB record_kp_snapshot / record_rl_model Tests
+# ============================================================
+
+class TestDBKPSnapshot:
+    """record_kp_snapshot 이중 기록 테스트"""
+
+    @pytest.mark.asyncio
+    async def test_record_kp_snapshot_supabase_and_local(self, snapshot, tmp_path):
+        """Supabase POST + 로컬 JSONL 이중 기록"""
+        with patch.dict(os.environ, {
+            "SUPABASE_URL": "https://test.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "test_key",
+        }, clear=False):
+            db = KimchirangDB(DBConfig())
+            # 로컬 경로를 tmp_path로 변경
+            import kimchirang.db as db_mod
+            original_dir = db_mod.LOCAL_DATA_DIR
+            db_mod.LOCAL_DATA_DIR = str(tmp_path)
+            try:
+                stats = {
+                    "kp_ma_1m": 1.8,
+                    "kp_ma_5m": 1.9,
+                    "kp_z_score": 0.5,
+                    "kp_velocity": 0.002,
+                    "spread_cost": 0.2,
+                    "funding_rate": 0.0001,
+                }
+                mock_resp = MagicMock(status_code=201, text="")
+                db._session.post = MagicMock(return_value=mock_resp)
+                await db.record_kp_snapshot(snapshot, stats)
+
+                # Supabase POST 호출 확인
+                db._session.post.assert_called_once()
+                call_args = db._session.post.call_args
+                assert "kimchirang_kp_history" in str(call_args)
+                posted_row = call_args[1]["json"] if "json" in call_args[1] else call_args[0][0]
+                # row가 json= kwarg으로 전달됨
+                assert posted_row["mid_kp"] == snapshot.mid_kp
+
+                # 로컬 JSONL 파일 확인
+                local_file = os.path.join(str(tmp_path), "kp_history.jsonl")
+                assert os.path.exists(local_file)
+                with open(local_file, "r", encoding="utf-8") as f:
+                    line = f.readline()
+                    data = json.loads(line)
+                    assert data["mid_kp"] == snapshot.mid_kp
+                    assert "_saved_at" in data
+            finally:
+                db_mod.LOCAL_DATA_DIR = original_dir
+
+    @pytest.mark.asyncio
+    async def test_record_kp_snapshot_disabled_local_only(self, snapshot, tmp_path):
+        """Supabase 미설정 시 로컬만 기록"""
+        with patch.dict(os.environ, {
+            "SUPABASE_URL": "",
+            "SUPABASE_SERVICE_ROLE_KEY": "",
+        }, clear=False):
+            db = KimchirangDB(DBConfig())
+            import kimchirang.db as db_mod
+            original_dir = db_mod.LOCAL_DATA_DIR
+            db_mod.LOCAL_DATA_DIR = str(tmp_path)
+            try:
+                stats = {"kp_ma_5m": 1.5}
+                await db.record_kp_snapshot(snapshot, stats)
+
+                local_file = os.path.join(str(tmp_path), "kp_history.jsonl")
+                assert os.path.exists(local_file)
+                with open(local_file, "r", encoding="utf-8") as f:
+                    data = json.loads(f.readline())
+                    assert data["mid_kp"] == snapshot.mid_kp
+            finally:
+                db_mod.LOCAL_DATA_DIR = original_dir
+
+
+class TestDBRLModel:
+    """record_rl_model 이중 기록 테스트"""
+
+    @pytest.mark.asyncio
+    async def test_record_rl_model_supabase_and_local(self, tmp_path):
+        """RL 모델 성과 기록 (이중 저장)"""
+        with patch.dict(os.environ, {
+            "SUPABASE_URL": "https://test.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "test_key",
+        }, clear=False):
+            db = KimchirangDB(DBConfig())
+            import kimchirang.db as db_mod
+            original_dir = db_mod.LOCAL_DATA_DIR
+            db_mod.LOCAL_DATA_DIR = str(tmp_path)
+            try:
+                model_info = {
+                    "model_type": "PPO",
+                    "version": "v1.0",
+                    "total_reward": 1523.4,
+                    "sharpe_ratio": 0.85,
+                    "max_drawdown": -3.2,
+                    "train_steps": 500000,
+                }
+                mock_resp = MagicMock(status_code=201, text="")
+                db._session.post = MagicMock(return_value=mock_resp)
+                await db.record_rl_model(model_info)
+
+                db._session.post.assert_called_once()
+                call_args = db._session.post.call_args
+                assert "kimchirang_rl_models" in str(call_args)
+
+                local_file = os.path.join(str(tmp_path), "rl_models.jsonl")
+                assert os.path.exists(local_file)
+                with open(local_file, "r", encoding="utf-8") as f:
+                    data = json.loads(f.readline())
+                    assert data["model_type"] == "PPO"
+                    assert data["train_steps"] == 500000
+            finally:
+                db_mod.LOCAL_DATA_DIR = original_dir
+
+    @pytest.mark.asyncio
+    async def test_record_rl_model_disabled_local_only(self, tmp_path):
+        """Supabase 미설정 시 로컬만 기록"""
+        with patch.dict(os.environ, {
+            "SUPABASE_URL": "",
+            "SUPABASE_SERVICE_ROLE_KEY": "",
+        }, clear=False):
+            db = KimchirangDB(DBConfig())
+            import kimchirang.db as db_mod
+            original_dir = db_mod.LOCAL_DATA_DIR
+            db_mod.LOCAL_DATA_DIR = str(tmp_path)
+            try:
+                model_info = {"model_type": "DQN", "version": "v2.0"}
+                await db.record_rl_model(model_info)
+
+                local_file = os.path.join(str(tmp_path), "rl_models.jsonl")
+                assert os.path.exists(local_file)
+            finally:
+                db_mod.LOCAL_DATA_DIR = original_dir
+
+
+class TestDBLocalJSONL:
+    """로컬 JSONL 이중 기록 공통 테스트"""
+
+    @pytest.mark.asyncio
+    async def test_local_jsonl_appends(self, snapshot, tmp_path):
+        """여러 번 기록 시 JSONL에 행 추가"""
+        with patch.dict(os.environ, {
+            "SUPABASE_URL": "",
+            "SUPABASE_SERVICE_ROLE_KEY": "",
+        }, clear=False):
+            db = KimchirangDB(DBConfig())
+            import kimchirang.db as db_mod
+            original_dir = db_mod.LOCAL_DATA_DIR
+            db_mod.LOCAL_DATA_DIR = str(tmp_path)
+            try:
+                stats = {"kp_ma_5m": 1.0}
+                await db.record_kp_snapshot(snapshot, stats)
+                await db.record_kp_snapshot(snapshot, stats)
+                await db.record_kp_snapshot(snapshot, stats)
+
+                local_file = os.path.join(str(tmp_path), "kp_history.jsonl")
+                with open(local_file, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                    assert len(lines) == 3
+            finally:
+                db_mod.LOCAL_DATA_DIR = original_dir
+
+    @pytest.mark.asyncio
+    async def test_record_trade_local_jsonl(self, snapshot, tmp_path):
+        """record_trade도 로컬 JSONL에 기록"""
+        with patch.dict(os.environ, {
+            "SUPABASE_URL": "",
+            "SUPABASE_SERVICE_ROLE_KEY": "",
+        }, clear=False):
+            db = KimchirangDB(DBConfig())
+            import kimchirang.db as db_mod
+            original_dir = db_mod.LOCAL_DATA_DIR
+            db_mod.LOCAL_DATA_DIR = str(tmp_path)
+            try:
+                result = ExecutionResult(action="enter", kp_at_execution=3.5)
+                await db.record_trade(result, snapshot)
+
+                local_file = os.path.join(str(tmp_path), "trades.jsonl")
+                assert os.path.exists(local_file)
+                with open(local_file, "r", encoding="utf-8") as f:
+                    data = json.loads(f.readline())
+                    assert data["action"] == "enter"
+                    assert data["kp_at_execution"] == 3.5
+                    assert "_saved_at" in data
+            finally:
+                db_mod.LOCAL_DATA_DIR = original_dir
+
+    @pytest.mark.asyncio
+    async def test_record_error_local_jsonl(self, tmp_path):
+        """record_error도 로컬 JSONL에 기록"""
+        with patch.dict(os.environ, {
+            "SUPABASE_URL": "",
+            "SUPABASE_SERVICE_ROLE_KEY": "",
+        }, clear=False):
+            db = KimchirangDB(DBConfig())
+            import kimchirang.db as db_mod
+            original_dir = db_mod.LOCAL_DATA_DIR
+            db_mod.LOCAL_DATA_DIR = str(tmp_path)
+            try:
+                await db.record_error("tick", "test error message")
+
+                local_file = os.path.join(str(tmp_path), "errors.jsonl")
+                assert os.path.exists(local_file)
+                with open(local_file, "r", encoding="utf-8") as f:
+                    data = json.loads(f.readline())
+                    assert data["error_phase"] == "tick"
+                    assert "test error" in data["error_message"]
+            finally:
+                db_mod.LOCAL_DATA_DIR = original_dir

@@ -31,23 +31,28 @@ class KimchirangDB:
         self._key = config.supabase_key
         self._enabled = bool(self._url and self._key)
         os.makedirs(LOCAL_DATA_DIR, exist_ok=True)
-        if not self._enabled:
+
+        # requests.Session 재사용 (TCP 연결 풀링 + 헤더 재사용)
+        self._session: Optional[requests.Session] = None
+        if self._enabled:
+            self._session = requests.Session()
+            self._session.headers.update({
+                "apikey": self._key,
+                "Authorization": f"Bearer {self._key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            })
+        else:
             logger.warning("Supabase 미설정 -- 로컬 JSONL만 기록")
 
     def _post(self, table: str, row: dict) -> bool:
         """동기 POST (asyncio.to_thread에서 호출)"""
-        if not self._enabled:
+        if not self._enabled or self._session is None:
             return False
         try:
-            resp = requests.post(
+            resp = self._session.post(
                 f"{self._url}/rest/v1/{table}",
                 json=row,
-                headers={
-                    "apikey": self._key,
-                    "Authorization": f"Bearer {self._key}",
-                    "Content-Type": "application/json",
-                    "Prefer": "return=minimal",
-                },
                 timeout=10,
             )
             if resp.status_code in (200, 201):
@@ -75,10 +80,11 @@ class KimchirangDB:
         pnl: Optional[float] = None,
         stats: Optional[dict] = None,
         hold_duration_min: Optional[float] = None,
+        is_stop_loss: bool = False,
     ):
         """차익거래 기록 (Supabase + 로컬 이중 저장)"""
         action = result.action
-        if pnl is not None and action == "exit" and snapshot.mid_kp >= 8.0:
+        if is_stop_loss and action == "exit":
             action = "stop_loss"
 
         row = {
@@ -135,15 +141,16 @@ class KimchirangDB:
         self._save_local("kp_history.jsonl", row)
 
     async def record_error(self, phase: str, error: str):
-        """에러 기록"""
+        """에러 기록
+
+        kimchirang_trades의 CHECK 제약조건은 ('enter','exit','stop_loss')만 허용하므로
+        에러는 별도 로컬 파일에만 기록한다. Supabase에는 넣지 않는다.
+        """
         row = {
-            "action": "error",
-            "kp_at_execution": 0,
-            "both_success": False,
-            "kp_stats": {"error_phase": phase, "error_message": error[:500]},
-            "dry_run": True,
+            "error_phase": phase,
+            "error_message": error[:500],
+            "timestamp": time.time(),
         }
-        await asyncio.to_thread(self._post, "kimchirang_trades", dict(row))
         self._save_local("errors.jsonl", row)
 
     async def record_rl_model(self, model_info: dict):

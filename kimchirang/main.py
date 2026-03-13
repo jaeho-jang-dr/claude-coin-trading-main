@@ -11,6 +11,7 @@ import os
 import signal
 import sys
 import time
+import traceback
 
 import numpy as np
 
@@ -98,8 +99,8 @@ class RLBridge:
         """RL 에이전트에게 액션 요청 (앙상블)
 
         앙상블 규칙:
-          - 둘 다 같은 액션 → 그대로 실행
-          - 한쪽만 Enter/Exit → Hold (신중하게)
+          - 둘 다 같은 액션 -> 그대로 실행
+          - 한쪽만 Enter/Exit -> Hold (신중하게)
           - 단독 모델이면 그대로 실행
 
         Returns:
@@ -111,6 +112,10 @@ class RLBridge:
         ppo_action = self._predict(self._ppo_model, state, "PPO")
         dqn_action = self._predict(self._dqn_model, state, "DQN")
 
+        # 둘 다 실패 -> Hold
+        if ppo_action is None and dqn_action is None:
+            return ACTION_HOLD
+
         # 단독 모델
         if ppo_action is not None and dqn_action is None:
             return ppo_action
@@ -121,16 +126,40 @@ class RLBridge:
         if ppo_action == dqn_action:
             return ppo_action
 
-        # 불일치 → Hold (신중)
+        # 불일치 -> Hold (신중)
         return ACTION_HOLD
 
     def _predict(self, model, state: np.ndarray, name: str):
-        """단일 모델 추론"""
+        """단일 모델 추론
+
+        PPO(Box action space)는 continuous float를 반환하므로 구간 매핑 필요:
+          action < -0.33 -> EXIT(2)
+          action > +0.33 -> ENTER(1)
+          그 외 -> HOLD(0)
+        DQN(Discrete)은 int를 직접 반환.
+        """
         if model is None:
             return None
         try:
             action, _ = model.predict(state, deterministic=True)
-            return int(action)
+            action = np.asarray(action).flatten()
+
+            # Discrete 모델: 스칼라 정수 반환
+            if action.size == 1 and float(action[0]) == int(action[0]):
+                return int(action[0])
+
+            # Continuous 모델: 구간 매핑
+            if action.size == 1:
+                val = float(action[0])
+                if val > 0.33:
+                    return ACTION_ENTER
+                elif val < -0.33:
+                    return ACTION_EXIT
+                else:
+                    return ACTION_HOLD
+
+            # Multi-dim: argmax fallback
+            return int(np.argmax(action))
         except Exception as e:
             logger.error(f"{name} 추론 실패: {e}")
             return None
@@ -157,6 +186,11 @@ class RLBridge:
 class KimchirangBot:
     """김치프리미엄 차익거래 봇 메인 클래스"""
 
+    # 연속 tick 오류 허용 한도 -- 초과 시 봇 자체 재시작 고려
+    MAX_CONSECUTIVE_ERRORS = 30
+    # 치명적 오류 (봇 중단해야 하는 예외 타입)
+    FATAL_EXCEPTIONS = (SystemExit, KeyboardInterrupt, MemoryError)
+
     def __init__(self):
         self.config = KimchirangConfig()
         self.feeder = DataFeeder(self.config)
@@ -167,6 +201,7 @@ class KimchirangBot:
         self.db = KimchirangDB(self.config.db)
         self._running = False
         self._tick_count = 0
+        self._consecutive_errors = 0
 
     async def run(self):
         """메인 실행"""
@@ -184,6 +219,9 @@ class KimchirangBot:
 
         # RL 모델 로드
         self.rl_bridge.load()
+
+        # Binance 서버 시간 동기화
+        await self.executor.sync_server_time()
 
         # Binance 레버리지 설정
         lev_ok = await self.executor.set_leverage()
@@ -211,75 +249,147 @@ class KimchirangBot:
             await self._shutdown()
 
     async def _main_loop(self):
-        """메인 트레이딩 루프 (1초 간격)"""
+        """메인 트레이딩 루프 (1초 간격)
+
+        치명적 오류와 일시적 오류를 구분한다:
+        - 일시적 오류 (네트워크, 데이터): 로깅 후 계속
+        - 치명적 오류 (메모리, 포지션 불일치): 봇 중단
+        - 연속 오류 MAX_CONSECUTIVE_ERRORS회: 에러 알림 + 계속 시도
+        """
         while self._running:
             try:
                 await self._tick()
+                self._consecutive_errors = 0  # 성공 시 리셋
+            except self.FATAL_EXCEPTIONS:
+                raise  # 치명적 예외는 즉시 전파
             except Exception as e:
-                logger.error(f"Tick 오류: {e}", exc_info=True)
+                self._consecutive_errors += 1
+                # 포지션 관련 오류는 더 심각하게 취급
+                is_position_error = "position" in str(e).lower() or "포지션" in str(e)
+                if is_position_error:
+                    logger.critical(
+                        f"포지션 관련 Tick 오류: {e}\n{traceback.format_exc()}"
+                    )
+                    # 포지션 불일치는 매우 위험 -- 알림 후 계속 (자동 중단하면 더 위험)
+                    try:
+                        await self.notifier.notify_error(
+                            "tick_position", f"포지션 오류: {str(e)[:200]}"
+                        )
+                    except Exception:
+                        pass
+                elif self._consecutive_errors <= 3:
+                    logger.error(f"Tick 오류 ({self._consecutive_errors}회): {e}")
+                elif self._consecutive_errors % 10 == 0:
+                    # 매 10회마다만 상세 로그 (로그 폭주 방지)
+                    logger.error(
+                        f"Tick 연속 오류 {self._consecutive_errors}회: {e}",
+                        exc_info=True,
+                    )
+
+                if self._consecutive_errors == self.MAX_CONSECUTIVE_ERRORS:
+                    logger.error(
+                        f"Tick 연속 {self.MAX_CONSECUTIVE_ERRORS}회 오류 -- "
+                        "텔레그램 알림 전송"
+                    )
+                    try:
+                        await self.notifier.notify_error(
+                            "tick_loop",
+                            f"연속 {self.MAX_CONSECUTIVE_ERRORS}회 오류. "
+                            f"마지막: {str(e)[:200]}"
+                        )
+                        await self.db.record_error("tick_loop", str(e)[:500])
+                    except Exception:
+                        pass
 
             await asyncio.sleep(1.0)
 
     async def _tick(self):
         """1초마다 실행되는 메인 로직"""
         self._tick_count += 1
+        tick = self._tick_count
 
         # 1. KP 계산
         snapshot = self.engine.calculate()
         if not snapshot.is_valid:
             return
 
-        stats = self.engine.get_stats()
-        pos = self.executor.get_position_info()
+        # 주기적 작업이 필요한 tick에서만 stats/pos 생성
+        need_log = (tick % 10 == 0)
+        need_db = (tick % 60 == 0)
+        need_notify = (tick % 300 == 0)
 
-        # 2. 주기적 상태 로그 (10초마다)
-        if self._tick_count % 10 == 0:
-            logger.info(
-                f"[KP] mid={stats['mid_kp']:+.2f}% "
-                f"entry={stats['entry_kp']:+.2f}% "
-                f"exit={stats['exit_kp']:+.2f}% "
-                f"| MA5m={stats['kp_ma_5m']:+.2f}% "
-                f"Z={stats['kp_z_score']:+.2f} "
-                f"V={stats['kp_velocity']:+.3f}%/m "
-                f"| FR={stats['funding_rate']*100:+.4f}% "
-                f"| pos={pos['side']}"
-            )
+        if need_log or need_db or need_notify:
+            stats = self.engine.get_stats()
+            pos = self.executor.get_position_info()
 
-        # 2b. KP 히스토리 DB 기록 (1분마다)
-        if self._tick_count % 60 == 0:
-            await self.db.record_kp_snapshot(snapshot, stats)
+            # 2. 주기적 상태 로그 (10초마다)
+            if need_log:
+                logger.info(
+                    f"[KP] mid={stats['mid_kp']:+.2f}% "
+                    f"entry={stats['entry_kp']:+.2f}% "
+                    f"exit={stats['exit_kp']:+.2f}% "
+                    f"| MA5m={stats['kp_ma_5m']:+.2f}% "
+                    f"Z={stats['kp_z_score']:+.2f} "
+                    f"V={stats['kp_velocity']:+.3f}%/m "
+                    f"| FR={stats['funding_rate']*100:+.4f}% "
+                    f"| pos={pos['side']}"
+                )
 
-        # 2c. 주기적 텔레그램 상태 보고 (5분마다)
-        if self._tick_count % 300 == 0:
-            await self.notifier.notify_status(stats, pos)
+            # 2b. KP 히스토리 DB 기록 (1분마다)
+            if need_db:
+                try:
+                    await self.db.record_kp_snapshot(snapshot, stats)
+                except Exception as e:
+                    logger.warning(f"KP DB 기록 실패 (무시): {e}")
+
+            # 2c. 주기적 텔레그램 상태 보고 (5분마다)
+            if need_notify:
+                try:
+                    await self.notifier.notify_status(stats, pos)
+                except Exception as e:
+                    logger.warning(f"텔레그램 상태 보고 실패 (무시): {e}")
 
         # 3. 데이터 신선도 체크
         age = self.feeder.state.data_age_sec
         if any(v > 10 for v in age.values() if v >= 0):
-            if self._tick_count % 30 == 0:
+            if tick % 30 == 0:
                 logger.warning(f"데이터 지연: {age}")
             return
 
         # 4. RL 에이전트 액션 결정
         action = self._decide_action(snapshot)
 
-        # 5. 주문 실행
+        # 5. 주문 실행 (trade 기록 시에만 stats 가져오기 -- 대부분 tick은 HOLD)
         if action == ACTION_ENTER:
             result = await self.executor.enter(snapshot)
             if result.both_success:
-                await self.notifier.notify_enter(result, snapshot)
-                await self.db.record_trade(result, snapshot, stats=stats)
+                stats = self.engine.get_stats()
+                try:
+                    await self.notifier.notify_enter(result, snapshot)
+                except Exception as e:
+                    logger.warning(f"진입 알림 실패 (무시): {e}")
+                try:
+                    await self.db.record_trade(result, snapshot, stats=stats)
+                except Exception as e:
+                    logger.warning(f"진입 DB 기록 실패 (무시): {e}")
 
         elif action == ACTION_EXIT:
             hold_min = self.executor.position.hold_duration_min
             result = await self.executor.exit(snapshot)
             if result.both_success:
-                pnl = self.executor._calculate_pnl(result, snapshot)
-                await self.notifier.notify_exit(result, snapshot, pnl)
-                await self.db.record_trade(
-                    result, snapshot, pnl=pnl, stats=stats,
-                    hold_duration_min=hold_min,
-                )
+                stats = self.engine.get_stats()
+                pnl = getattr(result, '_cached_pnl', 0.0)
+                try:
+                    await self.notifier.notify_exit(result, snapshot, pnl)
+                except Exception as e:
+                    logger.warning(f"청산 알림 실패 (무시): {e}")
+                try:
+                    await self.db.record_trade(
+                        result, snapshot, pnl=pnl, stats=stats,
+                        hold_duration_min=hold_min,
+                    )
+                except Exception as e:
+                    logger.warning(f"청산 DB 기록 실패 (무시): {e}")
 
         # 6. 손절 체크 (포지션 보유 중)
         if self.executor.position.is_open and self.engine.should_stop_loss(snapshot):
@@ -287,12 +397,19 @@ class KimchirangBot:
             hold_min = self.executor.position.hold_duration_min
             result = await self.executor.exit(snapshot)
             if result.both_success:
-                pnl = self.executor._calculate_pnl(result, snapshot)
-                await self.notifier.notify_stop_loss(result, snapshot, pnl)
-                await self.db.record_trade(
-                    result, snapshot, pnl=pnl, stats=stats,
-                    hold_duration_min=hold_min,
-                )
+                stats = self.engine.get_stats()
+                pnl = getattr(result, '_cached_pnl', 0.0)
+                try:
+                    await self.notifier.notify_stop_loss(result, snapshot, pnl)
+                except Exception as e:
+                    logger.warning(f"손절 알림 실패 (무시): {e}")
+                try:
+                    await self.db.record_trade(
+                        result, snapshot, pnl=pnl, stats=stats,
+                        hold_duration_min=hold_min,
+                    )
+                except Exception as e:
+                    logger.warning(f"손절 DB 기록 실패 (무시): {e}")
 
     def _decide_action(self, snapshot) -> int:
         """RL + 규칙 기반 하이브리드 결정"""
@@ -325,9 +442,18 @@ class KimchirangBot:
         logger.info("Kimchirang 종료 중...")
         self._running = False
         # 포지션 상태 최종 저장
-        self.executor._save_state()
-        await self.executor.close()
-        await self.feeder.stop()
+        try:
+            self.executor._save_state()
+        except Exception as e:
+            logger.error(f"종료 시 포지션 저장 실패: {e}")
+        try:
+            await self.executor.close()
+        except Exception as e:
+            logger.error(f"종료 시 executor 정리 실패: {e}")
+        try:
+            await self.feeder.stop()
+        except Exception as e:
+            logger.error(f"종료 시 feeder 정리 실패: {e}")
         logger.info("Kimchirang 종료 완료")
 
     def stop(self):

@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import subprocess
+from scripts.hide_console import subprocess_kwargs
 import sys
 import time
 from typing import Optional
@@ -181,6 +182,7 @@ class LiveTrader:
                 [sys.executable, script],
                 capture_output=True, text=True, timeout=timeout,
                 cwd=self.project_root,
+                **subprocess_kwargs(),
             )
             if proc.returncode == 0:
                 return json.loads(proc.stdout)
@@ -295,6 +297,7 @@ class LiveTrader:
             proc = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=30,
                 cwd=self.project_root,
+                **subprocess_kwargs(),
             )
 
             if proc.returncode == 0:
@@ -327,6 +330,7 @@ class LiveTrader:
                  "--message", message],
                 capture_output=True, timeout=10,
                 cwd=self.project_root,
+                **subprocess_kwargs(),
             )
         except Exception as e:
             logger.debug(f"알림 전송 실패: {e}")

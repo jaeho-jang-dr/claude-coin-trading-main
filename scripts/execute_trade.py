@@ -6,6 +6,9 @@ Upbit 매매 실행 스크립트
   - EMERGENCY_STOP=true → 모든 매매 차단
   - DRY_RUN=true → 분석만 수행, 실제 주문 미실행
   - MAX_TRADE_AMOUNT → 1회 매매 금액 상한
+  - MAX_DAILY_TRADES → 일일 매매 횟수 상한
+  - MIN_TRADE_INTERVAL_HOURS → 최소 매매 간격
+  - MAX_POSITION_RATIO → 총 자산 대비 최대 투자 비율
 
 사용법:
   python3 scripts/execute_trade.py bid KRW-BTC 100000   # 시장가 매수 (10만원)
@@ -58,8 +61,18 @@ def acquire_lock(timeout=15):
                 pid_alive = False
                 if lock_pid > 0:
                     try:
-                        os.kill(lock_pid, 0)
-                        pid_alive = True
+                        if os.name == "nt":
+                            import ctypes
+                            kernel32 = ctypes.windll.kernel32
+                            handle = kernel32.OpenProcess(0x100000, False, lock_pid)  # SYNCHRONIZE
+                            if handle:
+                                kernel32.CloseHandle(handle)
+                                pid_alive = True
+                            else:
+                                pid_alive = False
+                        else:
+                            os.kill(lock_pid, 0)
+                            pid_alive = True
                     except (OSError, ProcessLookupError):
                         pid_alive = False
                 if age > LOCK_TIMEOUT_SECONDS or not pid_alive:
@@ -140,8 +153,90 @@ def make_auth_header(query_string: str) -> dict:
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 
+DAILY_TRADES_FILE = PROJECT_DIR / "data" / "daily_trades.json"
+LAST_TRADE_TIME_FILE = PROJECT_DIR / "data" / "last_trade_time.txt"
+
+
+def _get_daily_trades() -> dict:
+    """오늘의 매매 횟수를 조회한다."""
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    try:
+        if DAILY_TRADES_FILE.exists():
+            data = json.loads(DAILY_TRADES_FILE.read_text(encoding="utf-8"))
+            if data.get("date") == today:
+                return data
+    except (json.JSONDecodeError, KeyError):
+        pass
+    return {"date": today, "count": 0}
+
+
+def _increment_daily_trades():
+    """오늘의 매매 횟수를 1 증가시킨다."""
+    data = _get_daily_trades()
+    data["count"] = data.get("count", 0) + 1
+    DAILY_TRADES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    DAILY_TRADES_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def _update_last_trade_time():
+    """마지막 매매 시각을 기록한다."""
+    LAST_TRADE_TIME_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LAST_TRADE_TIME_FILE.write_text(datetime.now(KST).isoformat(), encoding="utf-8")
+
+
+def _get_last_trade_time():
+    """마지막 매매 시각을 조회한다. 없으면 None."""
+    try:
+        if LAST_TRADE_TIME_FILE.exists():
+            text = LAST_TRADE_TIME_FILE.read_text(encoding="utf-8").strip()
+            return datetime.fromisoformat(text)
+    except (ValueError, OSError):
+        pass
+    return None
+
+
+def _get_btc_position_ratio() -> float | None:
+    """현재 BTC 포지션 비율(0~1)을 조회한다. 실패 시 None."""
+    try:
+        sys.path.insert(0, str(PROJECT_DIR))
+        from scripts.get_portfolio import main as _portfolio_main
+        # get_portfolio.main()은 stdout에 JSON을 출력하므로, 직접 API 호출로 대체
+        import io
+        old_stdout = sys.stdout
+        sys.stdout = buf = io.StringIO()
+        try:
+            _portfolio_main()
+        finally:
+            sys.stdout = old_stdout
+        portfolio = json.loads(buf.getvalue())
+        total_eval = portfolio.get("total_eval", 0)
+        if total_eval <= 0:
+            return 0.0
+        btc_eval = 0.0
+        for h in portfolio.get("holdings", []):
+            if h.get("currency") == "BTC":
+                btc_eval = h.get("eval_amount", 0)
+                break
+        return btc_eval / total_eval
+    except Exception as e:
+        print(f"[warning] BTC 포지션 비율 조회 실패: {e}", file=sys.stderr)
+        return None
+
+
 def execute(side: str, market: str, amount: str):
     ts = time.strftime("%Y-%m-%dT%H:%M:%S+09:00")
+
+    # 0) side 유효성 검사 (ET-07)
+    if side not in ("bid", "ask"):
+        return {
+            "success": False,
+            "dry_run": False,
+            "side": side,
+            "market": market,
+            "amount": amount,
+            "error": f"유효하지 않은 side: '{side}'. 'bid' 또는 'ask'만 허용됩니다.",
+            "timestamp": ts,
+        }
 
     # 1a) 사용자 긴급 정지 확인 (매도는 청산을 위해 허용)
     if os.environ.get("EMERGENCY_STOP", "false").lower() == "true":
@@ -162,8 +257,7 @@ def execute(side: str, market: str, amount: str):
     auto_em_file = PROJECT_DIR / "data" / "auto_emergency.json"
     if auto_em_file.exists() and side == "bid":  # 매수만 차단, 매도(청산)는 허용
         try:
-            import json as _json
-            auto_em = _json.loads(auto_em_file.read_text(encoding="utf-8"))
+            auto_em = json.loads(auto_em_file.read_text(encoding="utf-8"))
             if auto_em.get("active"):
                 return {
                     "success": False,
@@ -188,9 +282,89 @@ def execute(side: str, market: str, amount: str):
             "timestamp": ts,
         }
 
-    # 3) 매수 금액 상한 확인
+    # 2a) 일일 매매 횟수 상한 확인 (ET-01)
+    max_daily = int(os.environ.get("MAX_DAILY_TRADES", "6"))
+    daily_data = _get_daily_trades()
+    if daily_data["count"] >= max_daily:
+        return {
+            "success": False,
+            "dry_run": False,
+            "side": side,
+            "market": market,
+            "amount": amount,
+            "error": f"일일 매매 횟수 상한 도달: {daily_data['count']}/{max_daily}",
+            "timestamp": ts,
+        }
+
+    # 2b) 최소 매매 간격 확인 (ET-02)
+    min_interval = float(os.environ.get("MIN_TRADE_INTERVAL_HOURS", "4"))
+    last_trade = _get_last_trade_time()
+    if last_trade is not None:
+        elapsed_hours = (datetime.now(KST) - last_trade).total_seconds() / 3600
+        if elapsed_hours < min_interval:
+            remaining = min_interval - elapsed_hours
+            return {
+                "success": False,
+                "dry_run": False,
+                "side": side,
+                "market": market,
+                "amount": amount,
+                "error": f"최소 매매 간격 미충족: {elapsed_hours:.1f}h / {min_interval}h (잔여 {remaining:.1f}h)",
+                "timestamp": ts,
+            }
+
+    # 2c) 매수 시 최대 포지션 비율 확인 (ET-03)
+    if side == "bid":
+        max_pos_ratio = float(os.environ.get("MAX_POSITION_RATIO", "0.5"))
+        current_ratio = _get_btc_position_ratio()
+        if current_ratio is not None and current_ratio >= max_pos_ratio:
+            return {
+                "success": False,
+                "dry_run": False,
+                "side": side,
+                "market": market,
+                "amount": amount,
+                "error": f"최대 포지션 비율 초과: {current_ratio:.1%} >= {max_pos_ratio:.0%}",
+                "timestamp": ts,
+            }
+
+    # 2d) 매도 시 보유량 초과 확인 (ET-04)
+    if side == "ask":
+        try:
+            sell_volume = float(amount)
+            ratio = _get_btc_position_ratio()
+            if ratio is not None:
+                # 보유량 직접 확인
+                sys.path.insert(0, str(PROJECT_DIR))
+                import io as _io
+                from scripts.get_portfolio import main as _pf_main
+                old_stdout = sys.stdout
+                sys.stdout = buf = _io.StringIO()
+                try:
+                    _pf_main()
+                finally:
+                    sys.stdout = old_stdout
+                pf = json.loads(buf.getvalue())
+                for h in pf.get("holdings", []):
+                    if h.get("currency") == "BTC":
+                        held = h.get("balance", 0)
+                        if sell_volume > held:
+                            return {
+                                "success": False,
+                                "dry_run": False,
+                                "side": side,
+                                "market": market,
+                                "amount": amount,
+                                "error": f"매도 수량이 보유량 초과: {sell_volume} > {held}",
+                                "timestamp": ts,
+                            }
+                        break
+        except Exception as e:
+            print(f"[warning] 매도 보유량 검증 실패 (계속 진행): {e}", file=sys.stderr)
+
+    # 3) 매수 금액 상한 확인 (ET-08: float 비교로 수정)
     max_amount = int(os.environ.get("MAX_TRADE_AMOUNT", "100000"))
-    if side == "bid" and int(float(amount)) > max_amount:
+    if side == "bid" and float(amount) > max_amount:
         return {
             "success": False,
             "dry_run": False,
@@ -239,6 +413,14 @@ def execute(side: str, market: str, amount: str):
             response = r.json()
         except (ValueError, requests.exceptions.JSONDecodeError):
             response = {"raw_response": r.text[:500]}
+
+        # 성공 시 일일 매매 횟수 증가 + 마지막 매매 시각 기록
+        if r.ok:
+            try:
+                _increment_daily_trades()
+                _update_last_trade_time()
+            except Exception as e:
+                print(f"[warning] 매매 추적 기록 실패: {e}", file=sys.stderr)
 
         # 잔고 부족, 최소 주문 금액 등 API 에러 상세 처리
         error_msg = None

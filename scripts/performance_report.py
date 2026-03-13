@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import subprocess
+from scripts.hide_console import subprocess_kwargs
 import sys
 import time
 from datetime import datetime, timezone, timedelta
@@ -67,6 +68,7 @@ def send_telegram(message: str, parse_mode="MarkdownV2"):
              "report", "Performance Report", message],
             capture_output=True, text=True, timeout=30,
             cwd=str(PROJECT_DIR),
+            **subprocess_kwargs(),
         )
         return result.returncode == 0
     except Exception:
@@ -105,6 +107,7 @@ def hourly_monitor():
         capture_output=True, text=True, timeout=120,
         cwd=str(PROJECT_DIR),
         env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
+        **subprocess_kwargs(),
     )
     if result.stdout:
         print(f"  {result.stdout.strip()}")

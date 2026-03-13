@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import subprocess
+from scripts.hide_console import subprocess_kwargs
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -46,6 +47,7 @@ def collect_current_market_data() -> dict:
             [python, "scripts/collect_market_data.py"],
             capture_output=True, text=True, timeout=30,
             cwd=str(PROJECT_ROOT),
+            **subprocess_kwargs(),
         )
         if proc.returncode == 0:
             result = json.loads(proc.stdout)
@@ -58,6 +60,7 @@ def collect_current_market_data() -> dict:
             [python, "scripts/collect_fear_greed.py"],
             capture_output=True, text=True, timeout=15,
             cwd=str(PROJECT_ROOT),
+            **subprocess_kwargs(),
         )
         if proc.returncode == 0:
             fgi_data = json.loads(proc.stdout)

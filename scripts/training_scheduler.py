@@ -386,6 +386,7 @@ def _notify_result(result: dict):
     """텔레그램으로 학습 결과 알림"""
     try:
         import subprocess
+        from scripts.hide_console import subprocess_kwargs
         tier = result["tier"]
         name = result["tier_name"]
         improved = "개선" if result["improved"] else "롤백"
@@ -413,6 +414,7 @@ def _notify_result(result: dict):
             check=False,
             capture_output=True,
             timeout=15,
+            **subprocess_kwargs(),
         )
     except Exception:
         pass
@@ -466,12 +468,14 @@ def show_status():
     print("\n  Task Scheduler:")
     try:
         import subprocess
+        from scripts.hide_console import subprocess_kwargs as _skw
         result = subprocess.run(
             ["powershell", "-Command",
              "Get-ScheduledTask -TaskName 'CoinTrading_RL_*' -ErrorAction SilentlyContinue | "
              "ForEach-Object { $info = Get-ScheduledTaskInfo -TaskName $_.TaskName -ErrorAction SilentlyContinue; "
              "\"    $($_.State) | $($_.TaskName) | Next: $($info.NextRunTime)\" }"],
             capture_output=True, text=True, timeout=10,
+            **_skw(),
         )
         if result.stdout.strip():
             print(result.stdout)

@@ -255,6 +255,7 @@ def run_retrain(force: bool = False, dry_run: bool = False):
 def _send_telegram_report(record: dict):
     """텔레그램으로 재학습 결과 보고"""
     import subprocess
+    from scripts.hide_console import subprocess_kwargs
 
     stats = record["new_stats"]
     baseline = record.get("baseline_stats")
@@ -290,6 +291,7 @@ def _send_telegram_report(record: dict):
         [sys.executable, "scripts/notify_telegram.py", "--message", message],
         capture_output=True,
         timeout=15,
+        **subprocess_kwargs(),
     )
 
 

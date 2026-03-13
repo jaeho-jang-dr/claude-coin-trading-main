@@ -28,12 +28,16 @@ UPBIT_API = "https://api.upbit.com/v1"
 
 
 def make_auth_header() -> dict:
+    access_key = os.environ.get("UPBIT_ACCESS_KEY", "")
+    secret_key = os.environ.get("UPBIT_SECRET_KEY", "")
+    if not access_key or not secret_key:
+        raise ValueError("UPBIT_ACCESS_KEY / UPBIT_SECRET_KEY 환경변수가 설정되지 않았습니다")
     payload = {
-        "access_key": os.environ["UPBIT_ACCESS_KEY"],
+        "access_key": access_key,
         "nonce": str(uuid.uuid4()),
         "timestamp": int(time.time() * 1000),
     }
-    token = jwt.encode(payload, os.environ["UPBIT_SECRET_KEY"], algorithm="HS256")
+    token = jwt.encode(payload, secret_key, algorithm="HS256")
     return {"Authorization": f"Bearer {token}"}
 
 

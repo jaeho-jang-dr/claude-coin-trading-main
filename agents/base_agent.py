@@ -204,6 +204,39 @@ class BaseStrategyAgent(ABC):
         if profit_pct >= self.target_profit_pct:
             # AI 시그널이 강세면 매도 유예 (1회만)
             if ai_signal_score > 20:
+                # 이전 사이클에서 이미 유예했는지 확인 (무한 유예 방지)
+                state_file = Path(__file__).resolve().parent.parent / "data" / "agent_state.json"
+                already_deferred = False
+                try:
+                    with open(state_file, encoding="utf-8") as _sf:
+                        _st = json.load(_sf)
+                        already_deferred = _st.get("deferred_target_profit", False)
+                except (FileNotFoundError, json.JSONDecodeError):
+                    pass
+                if already_deferred:
+                    # 이미 1회 유예함 → 매도 실행, 플래그 초기화
+                    try:
+                        with open(state_file, encoding="utf-8") as _sf:
+                            _st = json.load(_sf)
+                        _st["deferred_target_profit"] = False
+                        with open(state_file, "w", encoding="utf-8") as _sf:
+                            json.dump(_st, _sf, ensure_ascii=False, indent=2)
+                    except (FileNotFoundError, json.JSONDecodeError):
+                        pass
+                    return {
+                        "action": "sell",
+                        "reason": f"목표 수익 {profit_pct:.1f}% 달성, AI 시그널 강세({ai_signal_score})이나 이미 1회 유예 완료 → 매도",
+                        "type": "target_profit",
+                    }
+                # 첫 유예 → 플래그 설정
+                try:
+                    with open(state_file, encoding="utf-8") as _sf:
+                        _st = json.load(_sf)
+                    _st["deferred_target_profit"] = True
+                    with open(state_file, "w", encoding="utf-8") as _sf:
+                        json.dump(_st, _sf, ensure_ascii=False, indent=2)
+                except (FileNotFoundError, json.JSONDecodeError):
+                    pass
                 return {
                     "action": "hold_defer",
                     "reason": f"목표 수익 {profit_pct:.1f}% 달성이나 AI 시그널 강세({ai_signal_score}) → 1회 유예",

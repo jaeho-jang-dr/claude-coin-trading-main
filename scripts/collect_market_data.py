@@ -129,7 +129,7 @@ def bollinger(prices: list[float], period: int = 20) -> dict:
     if mid is None:
         return {"upper": 0, "middle": 0, "lower": 0}
     window = prices[-period:]
-    var = sum((p - mid) ** 2 for p in window) / period
+    var = sum((p - mid) ** 2 for p in window) / (period - 1)
     sd = var**0.5
     return {
         "upper": round(mid + 2 * sd, 2),

@@ -38,7 +38,7 @@ def main():
     ]
 
     result = {
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "current": history[0],
         "history_7d": history,
     }

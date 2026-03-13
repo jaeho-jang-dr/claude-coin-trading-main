@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import subprocess
+from scripts.hide_console import subprocess_kwargs
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -79,6 +80,7 @@ def _run_script(script_name: str, args: list[str] | None = None, timeout: int = 
             timeout=timeout,
             cwd=str(PROJECT_DIR),
             encoding="utf-8",
+            **subprocess_kwargs(),
         )
         if result.returncode == 0 and result.stdout.strip():
             return json.loads(result.stdout)
@@ -266,24 +268,26 @@ def load_performance_review() -> dict:
     recent_streak = 0
     streak_type = None
 
+    # 승/패 카운트 (전체 순회)
     for d in decisions:
         pl = float(d.get("profit_loss", 0))
         total_pl += pl
         if pl > 0:
             wins += 1
-            if streak_type is None:
-                streak_type = "win"
-            if streak_type == "win":
-                recent_streak += 1
         elif pl < 0:
             losses += 1
-            if streak_type is None:
-                streak_type = "loss"
-            if streak_type == "loss":
-                recent_streak += 1
 
-        if streak_type and ((pl > 0 and streak_type == "loss") or (pl < 0 and streak_type == "win")):
-            break  # 연속 끊김
+    # 연속 스트릭 계산 (별도 순회, 방향 전환 시 중단)
+    for d in decisions:
+        pl = float(d.get("profit_loss", 0))
+        if streak_type is None:
+            streak_type = "win" if pl > 0 else "loss" if pl < 0 else None
+        if streak_type == "win" and pl > 0:
+            recent_streak += 1
+        elif streak_type == "loss" and pl < 0:
+            recent_streak += 1
+        else:
+            break
 
     total = wins + losses
     win_rate = round(wins / total * 100, 1) if total > 0 else 0

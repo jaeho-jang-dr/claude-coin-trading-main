@@ -9,6 +9,7 @@
 import argparse
 import os
 import subprocess
+from scripts.hide_console import subprocess_kwargs
 import sys
 
 TASK_NAME = "CoinTrading_Weekly_Retrain"
@@ -38,7 +39,7 @@ def register_task():
         "/F",                 # 기존 덮어쓰기
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, **subprocess_kwargs())
     if result.returncode == 0:
         print(f"[OK] 작업 등록 완료: {TASK_NAME}")
         print(f"  실행: 매주 일요일 03:00")
@@ -54,6 +55,7 @@ def remove_task():
     result = subprocess.run(
         ["schtasks", "/Delete", "/TN", TASK_NAME, "/F"],
         capture_output=True, text=True,
+        **subprocess_kwargs(),
     )
     if result.returncode == 0:
         print(f"[OK] 작업 해제 완료: {TASK_NAME}")
@@ -66,6 +68,7 @@ def check_status():
     result = subprocess.run(
         ["schtasks", "/Query", "/TN", TASK_NAME, "/V", "/FO", "LIST"],
         capture_output=True, text=True,
+        **subprocess_kwargs(),
     )
     if result.returncode == 0:
         print(result.stdout)

@@ -14,6 +14,7 @@ import io
 import json
 import os
 import subprocess
+from scripts.hide_console import subprocess_kwargs
 import sys
 import time
 from datetime import datetime, timezone, timedelta
@@ -354,6 +355,7 @@ class Healer:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 cwd=str(self.project_root),
+                **subprocess_kwargs(),
             )
             return True
         except OSError as e:

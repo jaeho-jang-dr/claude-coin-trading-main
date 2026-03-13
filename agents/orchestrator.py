@@ -391,7 +391,7 @@ class Orchestrator:
 
         # BTC 과다 보유 (최대 20점)
         if btc_ratio > 0.3:
-            score += int((btc_ratio - 0.3) * 100)  # 0.3→0, 0.5→20, 0.7→40
+            score += min(int((btc_ratio - 0.3) * 100), 20)  # 0.3→0, 0.5→20 (최대 20점)
 
         # 급락 (최대 25점)
         if price_change_24h < -3:
@@ -1068,11 +1068,11 @@ class Orchestrator:
 
         # ① DCA인데 캐스케이딩 극심 → 매도로 전환
         if decision.decision == "buy" and is_dca and cascade >= 70:
-            btc_holding = {}  # 매도 볼륨은 에이전트가 이미 계산했을 수 있음
             sell_trade_params = {
                 "market": "KRW-BTC",
                 "side": "ask",
-                "volume": None,  # sell all BTC (execute_trade.py handles full-sell)
+                "volume": None,
+                "sell_all": True,  # run_agents.py가 포트폴리오에서 BTC 잔고를 조회하여 매도
                 "ord_type": "market",
             }
             overridden = Dec(
@@ -1317,6 +1317,7 @@ class Orchestrator:
         """긴급정지 발동/해제 시 텔레그램 알림."""
         try:
             import subprocess
+            from scripts.hide_console import subprocess_kwargs
             emoji = "🚨" if action == "activate" else "✅"
             title = "자동 긴급정지 발동" if action == "activate" else "자동 긴급정지 해제"
             subprocess.run(
@@ -1327,6 +1328,7 @@ class Orchestrator:
                 capture_output=True,
                 timeout=10,
                 cwd=str(PROJECT_DIR),
+                **subprocess_kwargs(),
             )
         except Exception:
             pass  # 알림 실패는 무시

@@ -16,6 +16,7 @@ import os
 import re
 import socket
 import subprocess
+from scripts.hide_console import subprocess_kwargs
 import sys
 import threading
 from datetime import datetime
@@ -110,7 +111,8 @@ def api_portfolio():
         python = str(PROJECT_DIR / ".venv" / "Scripts" / "python.exe")
         result = subprocess.run(
             [python, str(PROJECT_DIR / "scripts" / "get_portfolio.py")],
-            capture_output=True, text=True, timeout=30, encoding="utf-8"
+            capture_output=True, text=True, timeout=30, encoding="utf-8",
+            **subprocess_kwargs(),
         )
         return json.loads(result.stdout)
     except Exception as e:
@@ -123,7 +125,8 @@ def api_market():
         python = str(PROJECT_DIR / ".venv" / "Scripts" / "python.exe")
         result = subprocess.run(
             [python, str(PROJECT_DIR / "scripts" / "collect_market_data.py")],
-            capture_output=True, text=True, timeout=30, encoding="utf-8"
+            capture_output=True, text=True, timeout=30, encoding="utf-8",
+            **subprocess_kwargs(),
         )
         return json.loads(result.stdout)
     except Exception as e:
@@ -339,12 +342,14 @@ def _run_analysis():
             subprocess.run(
                 [python, str(PROJECT_DIR / "scripts" / s)],
                 capture_output=True, timeout=30,
+                **subprocess_kwargs(),
             )
         # 텔레그램 알림
         subprocess.run(
             [python, str(PROJECT_DIR / "scripts" / "notify_telegram.py"),
              "trade", "수동 분석 실행됨 (웹 대시보드)", "웹 리모트 컨트롤에서 수동 실행"],
             capture_output=True, timeout=15,
+            **subprocess_kwargs(),
         )
     except Exception:
         pass

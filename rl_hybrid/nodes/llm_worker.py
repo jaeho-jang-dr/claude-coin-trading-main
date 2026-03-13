@@ -211,11 +211,13 @@ class LLMWorkerNode(BaseNode):
         external = {}
         try:
             import subprocess
+            from scripts.hide_console import subprocess_kwargs
             # FGI 수집
             result = subprocess.run(
                 [sys.executable, "scripts/collect_fear_greed.py"],
                 capture_output=True, text=True, timeout=15,
                 cwd=config.project_root,
+                **subprocess_kwargs(),
             )
             if result.returncode == 0:
                 external["fgi"] = json.loads(result.stdout)

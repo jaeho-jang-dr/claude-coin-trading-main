@@ -371,10 +371,12 @@ class MainBrainNode(BaseNode):
         """기존 collect_market_data.py 호출"""
         try:
             import subprocess
+            from scripts.hide_console import subprocess_kwargs
             result = subprocess.run(
                 [sys.executable, "scripts/collect_market_data.py"],
                 capture_output=True, text=True, timeout=30,
                 cwd=config.project_root,
+                **subprocess_kwargs(),
             )
             if result.returncode == 0:
                 return json.loads(result.stdout)

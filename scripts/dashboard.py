@@ -11,6 +11,7 @@ import io
 import json
 import os
 import subprocess
+from scripts.hide_console import subprocess_kwargs
 import sys
 import socket
 import time
@@ -33,6 +34,7 @@ def run_script(name, *args):
             [VENV_PYTHON, str(PROJECT_ROOT / "scripts" / name), *args],
             capture_output=True, text=True, timeout=30,
             env={**os.environ, "PYTHONPATH": str(PROJECT_ROOT)},
+            **subprocess_kwargs(),
         )
         return json.loads(r.stdout) if r.returncode == 0 else {"error": r.stderr.strip()}
     except Exception as e:

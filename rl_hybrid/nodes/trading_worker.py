@@ -133,6 +133,7 @@ class TradingWorkerNode(BaseNode):
         # 2. 매매 실행 (기존 execute_trade.py 호출)
         try:
             import subprocess
+            from scripts.hide_console import subprocess_kwargs
             cmd_args = [
                 sys.executable, "scripts/execute_trade.py",
                 "--side", side,
@@ -147,6 +148,7 @@ class TradingWorkerNode(BaseNode):
                 cmd_args,
                 capture_output=True, text=True, timeout=30,
                 cwd=config.project_root,
+                **subprocess_kwargs(),
             )
 
             if result.returncode == 0:
@@ -171,10 +173,12 @@ class TradingWorkerNode(BaseNode):
         """포트폴리오 조회"""
         try:
             import subprocess
+            from scripts.hide_console import subprocess_kwargs
             result = subprocess.run(
                 [sys.executable, "scripts/get_portfolio.py"],
                 capture_output=True, text=True, timeout=15,
                 cwd=config.project_root,
+                **subprocess_kwargs(),
             )
 
             if result.returncode == 0:

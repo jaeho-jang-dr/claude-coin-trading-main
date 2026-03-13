@@ -55,7 +55,7 @@ install_cron() {
     1) SCHEDULE="0 0,4,8,12,16,20 * * *" ; DESC="4시간 간격" ;;
     2) SCHEDULE="0 0,8,16 * * *"          ; DESC="8시간 간격" ;;
     3) SCHEDULE="0 0,12 * * *"            ; DESC="12시간 간격" ;;
-    4) SCHEDULE="0 0 * * *"               ; DESC="24시간 (매일 자정)" ;;
+    4) SCHEDULE="0 9 * * *"               ; DESC="24시간 (매일 9시)" ;;
     *) echo -e "${RED}잘못된 선택입니다.${NC}"; return 1 ;;
   esac
 

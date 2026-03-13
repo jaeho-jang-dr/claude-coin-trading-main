@@ -15,6 +15,7 @@
 import argparse
 import os
 import subprocess
+from scripts.hide_console import subprocess_kwargs
 import sys
 import threading
 import time
@@ -39,6 +40,7 @@ def start_node(name: str, script: str, extra_args: list = None):
 
     proc = subprocess.Popen(
         cmd, cwd=PROJECT_ROOT, stdout=log_file, stderr=subprocess.STDOUT,
+        **subprocess_kwargs(),
     )
     processes.append((name, proc, log_file))
     print(f"  [{name}] PID={proc.pid}")
@@ -77,6 +79,7 @@ def start_weekly_retrain_scheduler():
                         cwd=PROJECT_ROOT,
                         capture_output=True, text=True,
                         timeout=1800,  # 최대 30분
+                        **subprocess_kwargs(),
                     )
                     if result.returncode == 0:
                         logger.info("주간 재학습 완료")

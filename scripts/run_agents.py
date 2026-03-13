@@ -271,11 +271,13 @@ def notify_error(msg: str, detail: str):
     log(f"ERROR: {msg}")
     try:
         import subprocess
+        from scripts.hide_console import subprocess_kwargs
         subprocess.run(
             [sys.executable, "scripts/notify_telegram.py", "error", msg, detail],
             cwd=str(PROJECT_DIR),
             check=False,
-            capture_output=True
+            capture_output=True,
+            **subprocess_kwargs(),
         )
     except Exception as e:
         log(f"텔레그램 전송 실패: {e}")
@@ -283,13 +285,15 @@ def notify_error(msg: str, detail: str):
 
 async def run_script(script_name: str) -> dict:
     import subprocess
+    from scripts.hide_console import subprocess_kwargs
     """별도 프로세스로 스크립트를 실행하여 JSON 결과 반환"""
     try:
         proc = await asyncio.create_subprocess_exec(
             sys.executable, f"scripts/{script_name}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=str(PROJECT_DIR)
+            cwd=str(PROJECT_DIR),
+            **subprocess_kwargs(),
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
@@ -527,10 +531,12 @@ def main():
         past_decisions = []
         try:
             import subprocess as _sp
+            from scripts.hide_console import subprocess_kwargs
             rag_result = _sp.run(
                 [sys.executable, "scripts/recall_rag.py", "--json", "--top", "3"],
                 cwd=str(PROJECT_DIR),
                 capture_output=True, text=True, timeout=30,
+                **subprocess_kwargs(),
             )
             if rag_result.returncode == 0 and rag_result.stdout.strip():
                 rag_data = json.loads(rag_result.stdout)
@@ -674,8 +680,9 @@ def main():
     market = trade_params.get("market", "KRW-BTC")
     
     import subprocess
+    from scripts.hide_console import subprocess_kwargs
     trade_log = str(log_dir / f"trade_{timestamp}.log")
-    
+
     if decision == "buy":
         amount = trade_params.get("amount", 0)
         is_dca = trade_params.get("is_dca", False)
@@ -683,13 +690,19 @@ def main():
             dca_tag = " [DCA]" if is_dca else ""
             log(f"매수 실행: {market} {amount} KRW{dca_tag}")
             with open(trade_log, "w", encoding="utf-8") as tf:
-                subprocess.run([sys.executable, "scripts/execute_trade.py", "bid", market, str(amount)], cwd=str(PROJECT_DIR), stdout=tf, stderr=subprocess.STDOUT)
+                subprocess.run([sys.executable, "scripts/execute_trade.py", "bid", market, str(amount)], cwd=str(PROJECT_DIR), stdout=tf, stderr=subprocess.STDOUT, **subprocess_kwargs())
     elif decision == "sell":
         volume = trade_params.get("volume", 0)
-        if float(volume) > 0:
+        sell_all = trade_params.get("sell_all", False)
+        if sell_all:
+            # sell_all 플래그: 포트폴리오에서 BTC 잔고를 조회하여 전량 매도
+            btc_bal = float(portfolio.get("btc", {}).get("balance", 0))
+            if btc_bal > 0:
+                volume = btc_bal
+        if float(volume or 0) > 0:
             log(f"매도 실행: {market} {volume} BTC")
             with open(trade_log, "w", encoding="utf-8") as tf:
-                subprocess.run([sys.executable, "scripts/execute_trade.py", "ask", market, str(volume)], cwd=str(PROJECT_DIR), stdout=tf, stderr=subprocess.STDOUT)
+                subprocess.run([sys.executable, "scripts/execute_trade.py", "ask", market, str(volume)], cwd=str(PROJECT_DIR), stdout=tf, stderr=subprocess.STDOUT, **subprocess_kwargs())
     else:
         log("관망 결정. 매매 없음.")
         
@@ -740,7 +753,7 @@ def main():
     )
     
     try:
-        subprocess.run([sys.executable, "scripts/notify_telegram.py", "trade", summary_msg, detail_msg], cwd=str(PROJECT_DIR), check=False)
+        subprocess.run([sys.executable, "scripts/notify_telegram.py", "trade", summary_msg, detail_msg], cwd=str(PROJECT_DIR), check=False, **subprocess_kwargs())
     except Exception:
         pass
         
@@ -922,7 +935,7 @@ def main():
 
     # Phase 6: 전환 성과 평가
     log("Phase 6: 전환 성과 평가...")
-    subprocess.run([sys.executable, "scripts/evaluate_switches.py"], cwd=str(PROJECT_DIR), check=False)
+    subprocess.run([sys.executable, "scripts/evaluate_switches.py"], cwd=str(PROJECT_DIR), check=False, **subprocess_kwargs())
     
     # Phase 6.5: RL 온라인 학습 버퍼
     if rl_advisory:
@@ -978,6 +991,18 @@ def main():
     print(json.dumps(output, ensure_ascii=False, indent=2))
 
 if __name__ == "__main__":
+    # Windows cp949 인코딩 문제 방지
+    if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     import argparse as _ap
     _parser = _ap.ArgumentParser()
     _parser.add_argument("--dry-run", action="store_true", help="DRY_RUN=true 강제 (포어그라운드 테스트용)")

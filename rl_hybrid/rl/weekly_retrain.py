@@ -79,9 +79,11 @@ def notify_telegram(message: str):
     """텔레그램 알림 전송"""
     try:
         import subprocess
+        from scripts.hide_console import subprocess_kwargs
         subprocess.run(
             [sys.executable, "scripts/notify_telegram.py", "info", "RL 주간 재학습", message],
             cwd=str(PROJECT_DIR), check=False, timeout=15,
+            **subprocess_kwargs(),
         )
     except Exception as e:
         logger.warning(f"텔레그램 알림 실패: {e}")

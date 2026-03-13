@@ -776,12 +776,14 @@ def save_portfolio_snapshot():
     """현재 포트폴리오 스냅샷을 저장한다."""
     try:
         import subprocess
+        from scripts.hide_console import subprocess_kwargs
         venv_python = Path(__file__).resolve().parent.parent / ".venv" / "bin" / "python3"
         python_cmd = str(venv_python) if venv_python.exists() else "python3"
         result = subprocess.run(
             [python_cmd, "scripts/get_portfolio.py"],
             capture_output=True, text=True, timeout=30,
             cwd=Path(__file__).resolve().parent.parent,
+            **subprocess_kwargs(),
         )
         if result.returncode != 0:
             return

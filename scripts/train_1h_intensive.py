@@ -623,6 +623,7 @@ def _notify_result(summary: dict):
     """텔레그램으로 훈련 결과 알림"""
     try:
         import subprocess
+        from scripts.hide_console import subprocess_kwargs
         phases = summary.get("phases", [])
         good = sum(1 for p in phases if p.get("improved"))
         total = len([p for p in phases if "error" not in p])
@@ -659,6 +660,7 @@ def _notify_result(summary: dict):
             check=False,
             capture_output=True,
             timeout=15,
+            **subprocess_kwargs(),
         )
     except Exception:
         pass

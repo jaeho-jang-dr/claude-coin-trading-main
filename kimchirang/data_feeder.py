@@ -497,7 +497,9 @@ class FXFeeder:
             logger.warning("FX Rate 갱신 실패 -- 기존 값 유지")
             return self.state.fx_rate
 
-        return None
+        # 소스 4: 최후 fallback — 최근 대략적 환율 (시작 불가 방지)
+        logger.warning("모든 FX 소스 실패 -- fallback 환율 1,450 KRW/USD 적용")
+        return 1450.0
 
     def stop(self):
         self._running = False

@@ -103,6 +103,9 @@ class Healer:
             "restart_process": self._restart_process,
             "adjust_config": self._adjust_config_wrapper,
             "emergency_stop": self._emergency_stop_wrapper,
+            "clean_junk": self._clean_junk_files,
+            "restart_bot": self._restart_bot,
+            "clean_logs": self._clean_large_logs,
         }
 
         handler = dispatch.get(action)
@@ -449,6 +452,138 @@ class Healer:
         except OSError as e:
             print(f"[healer] 긴급정지 파일 생성 실패: {e}", file=sys.stderr)
             return False
+
+    # ── 잔여 파일 정리 ──────────────────────────────────────
+
+    def _clean_junk_files(self, component: str) -> bool:
+        """프로젝트 루트의 잔여/임시 파일을 삭제한다."""
+        junk_patterns = ["*.png", "download_*.py"]
+        junk_dirs = ["claude-coin-trading-main", ".claude/worktrees"]
+
+        removed = 0
+
+        for pattern in junk_patterns:
+            for f in self.project_root.glob(pattern):
+                if f.is_file():
+                    if self.dry_run:
+                        print(f"[healer][DRY_RUN] 삭제 예정: {f.name}", file=sys.stderr)
+                    else:
+                        try:
+                            f.unlink()
+                            removed += 1
+                            print(f"[healer] 삭제: {f.name}", file=sys.stderr)
+                        except OSError as e:
+                            print(f"[healer] 삭제 실패: {f.name} — {e}", file=sys.stderr)
+
+        for d in junk_dirs:
+            p = self.project_root / d
+            if p.exists() and p.is_dir():
+                if self.dry_run:
+                    print(f"[healer][DRY_RUN] 디렉토리 삭제 예정: {d}", file=sys.stderr)
+                else:
+                    try:
+                        import shutil
+                        shutil.rmtree(p)
+                        removed += 1
+                        print(f"[healer] 디렉토리 삭제: {d}", file=sys.stderr)
+                    except OSError as e:
+                        print(f"[healer] 디렉토리 삭제 실패: {d} — {e}", file=sys.stderr)
+
+        print(f"[healer] 잔여 파일 정리: {removed}개 삭제", file=sys.stderr)
+        return True
+
+    def _restart_bot(self, component: str) -> bool:
+        """중단된 봇 프로세스를 재시작한다."""
+        bot_commands = {
+            "kimchirang": [sys.executable, "-m", "kimchirang.main"],
+            "short_term": [sys.executable, "scripts/short_term_trader.py"],
+            "dashboard": [sys.executable, "scripts/dashboard.py"],
+        }
+
+        # 어떤 봇이 죽었는지 확인
+        dead_bots = []
+        bot_keywords = {
+            "kimchirang": "kimchirang.main",
+            "short_term": "short_term_trader.py",
+            "dashboard": "dashboard.py",
+        }
+
+        for name, keyword in bot_keywords.items():
+            try:
+                result = subprocess.run(
+                    ["pgrep", "-f", keyword],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if not result.stdout.strip():
+                    dead_bots.append(name)
+            except Exception:
+                dead_bots.append(name)
+
+        if not dead_bots:
+            print("[healer] 모든 봇이 실행 중 — 재시작 불필요", file=sys.stderr)
+            return True
+
+        for bot_name in dead_bots:
+            cmd = bot_commands.get(bot_name)
+            if not cmd:
+                continue
+
+            if self.dry_run:
+                print(f"[healer][DRY_RUN] {bot_name} 재시작 예정", file=sys.stderr)
+                continue
+
+            try:
+                env = os.environ.copy()
+                if bot_name == "kimchirang":
+                    env["KR_DRY_RUN"] = env.get("KR_DRY_RUN", "true")
+
+                log_file = self.project_root / "logs" / f"{bot_name}.log"
+                with open(log_file, "a") as lf:
+                    subprocess.Popen(
+                        cmd,
+                        stdout=lf,
+                        stderr=subprocess.STDOUT,
+                        cwd=str(self.project_root),
+                        env=env,
+                    )
+                print(f"[healer] {bot_name} 재시작 완료", file=sys.stderr)
+            except OSError as e:
+                print(f"[healer] {bot_name} 재시작 실패: {e}", file=sys.stderr)
+                return False
+
+        return True
+
+    def _clean_large_logs(self, component: str) -> bool:
+        """50MB 이상 로그 파일을 truncate한다."""
+        logs_dir = self.project_root / "logs"
+        if not logs_dir.exists():
+            return True
+
+        truncated = 0
+        size_limit = 50 * 1024 * 1024  # 50MB
+
+        for f in logs_dir.rglob("*"):
+            if f.is_file():
+                try:
+                    if f.stat().st_size > size_limit:
+                        if self.dry_run:
+                            size_mb = f.stat().st_size / (1024 * 1024)
+                            print(f"[healer][DRY_RUN] truncate 예정: {f.name} ({size_mb:.0f}MB)", file=sys.stderr)
+                        else:
+                            # 마지막 1000줄만 유지
+                            try:
+                                lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+                                keep = lines[-1000:] if len(lines) > 1000 else lines
+                                f.write_text("\n".join(keep) + "\n", encoding="utf-8")
+                                truncated += 1
+                                print(f"[healer] truncate: {f.name} (마지막 1000줄 유지)", file=sys.stderr)
+                            except Exception as e:
+                                print(f"[healer] truncate 실패: {f.name} — {e}", file=sys.stderr)
+                except OSError:
+                    pass
+
+        print(f"[healer] 로그 정리: {truncated}개 파일 truncate", file=sys.stderr)
+        return True
 
     # ── 헬퍼 ──────────────────────────────────────────────
 

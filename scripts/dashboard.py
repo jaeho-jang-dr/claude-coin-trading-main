@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, redirect, render_template_string
+from flask import Flask, jsonify, redirect, render_template_string, send_from_directory
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
@@ -471,6 +471,12 @@ def api_analyze():
         })
     except Exception as e:
         return jsonify({"error": str(e)})
+
+
+@app.route("/docs/<path:filename>")
+def download_doc(filename):
+    """docs/ 폴더 파일 다운로드"""
+    return send_from_directory(PROJECT_ROOT / "docs", filename, as_attachment=True)
 
 
 if __name__ == "__main__":

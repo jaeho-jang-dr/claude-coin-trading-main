@@ -491,8 +491,8 @@ class ShortTermTrader:
             "entry_price": int(pos.entry_price),
             "exit_price": int(pos.exit_price) if pos.exit_price else None,
             "amount_krw": int(pos.amount_krw),
-            "pnl_pct": pos.pnl_pct,
-            "pnl_krw": int(pos.amount_krw * (pos.pnl_pct or 0) / 100),
+            "pnl_pct": pos.pnl_pct,  # 이미 수수료 왕복 차감된 값
+            "pnl_krw": int(pos.amount_krw * (pos.pnl_pct or 0) / 100),  # 수수료 반영 PnL
             "exit_reason": pos.exit_reason,
             "signal_reason": getattr(pos, '_signal_reason', None),
             "confidence": getattr(pos, '_confidence', None),
@@ -702,9 +702,11 @@ class ShortTermTrader:
                                     "score": p - n,
                                 })
 
-                    except ET.ParseError:
+                    except ET.ParseError as e:
+                        log.warning(f"RSS 파싱 실패 ({feed_url[:40]}): {e}")
                         continue
-                    except Exception:
+                    except Exception as e:
+                        log.warning(f"RSS 피드 에러 ({feed_url[:40]}): {e}")
                         continue
 
                 # seen dict가 너무 커지지 않도록 관리 (최근 300건만 유지)
@@ -717,7 +719,12 @@ class ShortTermTrader:
                 total = pos_count + neg_count
                 if total > 0:
                     self.news_sentiment_score = (pos_count - neg_count) / total
+                elif new_headlines == 0:
+                    # 새 헤드라인 없을 때 이전 감성 유지 (리셋 방지)
+                    # 단, 시간 경과에 따라 서서히 감쇠 (5분마다 20% 감쇠)
+                    self.news_sentiment_score *= 0.8
                 else:
+                    # 새 헤드라인은 있지만 키워드 없음 → 중립
                     self.news_sentiment_score = 0
 
                 prev = self.last_news_sentiment
@@ -760,10 +767,10 @@ class ShortTermTrader:
 
     def check_news_signal(self) -> TradeSignal | None:
         """뉴스 기반 매매 시그널 판단"""
-        if abs(self.news_sentiment_score) < 0.4:
+        if abs(self.news_sentiment_score) < 0.3:
             return None
 
-        if self.news_sentiment_score >= 0.4:
+        if self.news_sentiment_score >= 0.3:
             return TradeSignal(
                 strategy="news",
                 action="buy",
@@ -817,13 +824,13 @@ class ShortTermTrader:
         # 급락 후 리바운드 감지
         drop_pct = (high - low) / high * 100
         if drop_pct >= SPIKE_THRESHOLD_PCT:
-            # 바닥에서 반등 시작 확인 (최저점 대비 0.3% 이상 회복)
+            # 바닥에서 반등 시작 확인 (최저점 대비 0.2% 이상 회복)
             recovery = (current - low) / low * 100
-            if recovery >= 0.3 and current < high * 0.995:
-                # 체결 강도로 반등 확인
+            if recovery >= 0.2 and current < high * 0.998:
+                # 체결 강도로 반등 확인 (52% 이상이면 매수 우위)
                 buy_vol, sell_vol = self._get_recent_trade_volumes(now)
                 total = buy_vol + sell_vol
-                if total > 0 and buy_vol / total > 0.55:
+                if total > 0 and buy_vol / total > 0.52:
                     return TradeSignal(
                         strategy="spike",
                         action="buy",
@@ -838,10 +845,10 @@ class ShortTermTrader:
         surge_pct = (high - low) / low * 100
         if surge_pct >= SPIKE_THRESHOLD_PCT:
             pullback = (high - current) / high * 100
-            if pullback >= 0.3 and current > low * 1.005:
+            if pullback >= 0.2 and current > low * 1.002:
                 buy_vol, sell_vol = self._get_recent_trade_volumes(now)
                 total = buy_vol + sell_vol
-                if total > 0 and sell_vol / total > 0.55:
+                if total > 0 and sell_vol / total > 0.52:
                     return TradeSignal(
                         strategy="spike",
                         action="sell",
@@ -939,21 +946,23 @@ class ShortTermTrader:
         """보유 포지션의 익절/손절/시간제한 확인"""
         exits = []
         now = datetime.now(KST)
+        fee_roundtrip = COMMISSION_PCT * 2  # 왕복 수수료 0.10%
 
         for pos in self.positions:
             if self.current_price <= 0:
                 continue
 
-            pnl_pct = (self.current_price - pos.entry_price) / pos.entry_price * 100
+            raw_pnl = (self.current_price - pos.entry_price) / pos.entry_price * 100
+            pnl_pct = raw_pnl - fee_roundtrip  # 수수료 차감 실질 수익률
             hold_sec = (now - pos.entry_time).total_seconds()
 
-            # 익절
+            # 익절 (수수료 차감 후 기준)
             if pnl_pct >= pos.take_profit_pct:
-                exits.append((pos, f"익절 +{pnl_pct:.2f}%"))
+                exits.append((pos, f"익절 +{pnl_pct:.2f}% (수수료 후)"))
             # 손절
             elif pnl_pct <= -pos.stop_loss_pct:
                 exits.append((pos, f"손절 {pnl_pct:.2f}%"))
-            # v4: 조기 손절 -- 15분 경과 + -0.2% 이하면 타임아웃 기다리지 않고 청산
+            # v4: 조기 손절 -- 10분 경과 + -0.3% 이하면 타임아웃 기다리지 않고 청산
             elif hold_sec > EARLY_STOP_TIME_MIN * 60 and pnl_pct <= -EARLY_STOP_LOSS_PCT:
                 exits.append((pos, f"조기 손절: {hold_sec/60:.0f}분 경과 + {pnl_pct:+.2f}%"))
             # 시간 제한
@@ -1099,19 +1108,8 @@ class ShortTermTrader:
         self.daily_trade_count += 1
         self.used_budget += amount
 
-        # DB 기록
-        db_insert("scalp_trades", {
-            "strategy": signal.strategy,
-            "side": "bid",
-            "entry_price": int(entry_price),
-            "amount_krw": amount,
-            "btc_qty": float(btc_qty),
-            "entry_time": pos.entry_time.isoformat(),
-            "confidence": round(signal.confidence, 2),
-            "signal_reason": signal.reason,
-            "dry_run": self.dry_run,
-            "cycle_id": self.cycle_id,
-        })
+        # DB 기록: entry 시에는 기록하지 않음 (exit 시 완전한 1건으로 기록)
+        # 이전 코드는 entry/exit 각각 INSERT하여 중복 + exit_price=0 문제 발생
 
         send_telegram(
             f"<b>[초단타 매수]</b> {signal.strategy}\n"
@@ -1124,8 +1122,10 @@ class ShortTermTrader:
     def execute_exit(self, pos: Position, reason: str):
         """매도 청산"""
         exit_price = self.current_price
-        pnl_pct = (exit_price - pos.entry_price) / pos.entry_price * 100
-        pnl_krw = pos.amount_krw * pnl_pct / 100 - pos.amount_krw * COMMISSION_PCT / 100
+        # 수수료 왕복(매수+매도) 차감한 실질 수익률
+        raw_pnl_pct = (exit_price - pos.entry_price) / pos.entry_price * 100
+        pnl_pct = raw_pnl_pct - (COMMISSION_PCT * 2)  # 왕복 수수료 0.10% 차감
+        pnl_krw = pos.amount_krw * pnl_pct / 100
 
         log.info(
             f"[{pos.strategy}] 매도: {reason} | "
@@ -1176,7 +1176,7 @@ class ShortTermTrader:
         # v4: 완결된 거래를 scalp_trade_log에 기록
         self.log_completed_trade(pos)
 
-        # DB 기록 (매도 완료)
+        # DB 기록 (완결된 거래 1건 — entry+exit 통합)
         db_insert("scalp_trades", {
             "strategy": pos.strategy,
             "side": "ask",
@@ -1189,6 +1189,8 @@ class ShortTermTrader:
             "exit_reason": reason,
             "pnl_pct": round(pnl_pct, 3),
             "pnl_krw": int(pnl_krw),
+            "confidence": getattr(pos, '_confidence', None),
+            "signal_reason": getattr(pos, '_signal_reason', None),
             "cycle_id": self.cycle_id,
             "dry_run": self.dry_run,
         })

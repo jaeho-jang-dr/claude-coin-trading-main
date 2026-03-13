@@ -172,6 +172,46 @@ _KNOWN_PATTERNS: dict[tuple[str, str], dict] = {
         "confidence": 0.85,
         "auto_healable": True,
     },
+    # 잔여 파일
+    ("junk_files", "WARNING"): {
+        "cause": "프로젝트 루트에 임시/잔여 파일 과다 — 정리 필요",
+        "action": "clean_junk",
+        "confidence": 0.9,
+        "auto_healable": True,
+    },
+    # 봇 프로세스
+    ("bot_processes", "WARNING"): {
+        "cause": "봇 프로세스 중단 — 재시작 필요",
+        "action": "restart_bot",
+        "confidence": 0.9,
+        "auto_healable": True,
+    },
+    ("bot_processes", "ERROR"): {
+        "cause": "다수 봇 프로세스 중단 — 긴급 재시작",
+        "action": "restart_bot",
+        "confidence": 0.85,
+        "auto_healable": True,
+    },
+    # git 상태
+    ("git_status", "ERROR"): {
+        "cause": "git 충돌 파일 존재 — 수동 해결 필요",
+        "action": ACTION_ALERT,
+        "confidence": 0.95,
+        "auto_healable": False,
+    },
+    ("git_status", "WARNING"): {
+        "cause": "미추적 파일 과다 — 정리 또는 커밋 필요",
+        "action": ACTION_ALERT,
+        "confidence": 0.8,
+        "auto_healable": False,
+    },
+    # 로그 크기
+    ("log_size", "WARNING"): {
+        "cause": "로그 파일 크기 과다 — truncate 필요",
+        "action": "clean_logs",
+        "confidence": 0.9,
+        "auto_healable": True,
+    },
 }
 
 

@@ -185,8 +185,8 @@ class TestPositionExit:
         trader = _make_trader()
         pos = _make_position(entry_price=100_000_000)
         trader.positions.append(pos)
-        # Price rose 0.9% (above 0.8% take-profit)
-        trader.current_price = 100_900_000
+        # Price rose 1.0% -> after 0.1% fee = +0.9% net (above 0.8% take-profit)
+        trader.current_price = 101_000_000
         exits = trader.check_position_exit()
         assert len(exits) == 1
         assert "익절" in exits[0][1]
@@ -195,7 +195,7 @@ class TestPositionExit:
         trader = _make_trader()
         pos = _make_position(entry_price=100_000_000)
         trader.positions.append(pos)
-        # Price dropped 0.9%
+        # Price dropped 0.9% -> after fee = -1.0% net (below -0.8% stop-loss)
         trader.current_price = 99_100_000
         exits = trader.check_position_exit()
         assert len(exits) == 1
@@ -327,7 +327,7 @@ class TestNewsSignal:
 
     def test_weak_positive_returns_none(self):
         trader = _make_trader()
-        trader.news_sentiment_score = 0.3
+        trader.news_sentiment_score = 0.2  # Below 0.3 threshold
         assert trader.check_news_signal() is None
 
     def test_strong_positive_returns_buy(self):
@@ -733,14 +733,16 @@ class TestExecuteEntryDryRun:
 
     @patch("scripts.short_term_trader.send_telegram")
     @patch("scripts.short_term_trader.db_insert")
-    def test_dry_run_sends_db_record(self, mock_db, mock_tg):
+    def test_dry_run_sends_db_record_on_entry(self, mock_db, mock_tg):
+        """Entry no longer writes to scalp_trades (Bug fix: 중복 기록 방지).
+        DB insert only happens via log_signal_attempt (signal_attempt_log)."""
         trader = _make_trader(dry_run=True)
         signal = TradeSignal(strategy="news", action="buy", confidence=0.8, reason="test")
         trader.execute_entry(signal)
-        mock_db.assert_called()
-        call_args = mock_db.call_args
-        assert call_args[0][0] == "scalp_trades"
-        assert call_args[0][1]["dry_run"] is True
+        # Entry should only log signal_attempt, NOT scalp_trades
+        db_calls = [c[0][0] for c in mock_db.call_args_list]
+        assert "scalp_trades" not in db_calls
+        assert "signal_attempt_log" in db_calls
 
 
 # ===========================================================================
@@ -754,11 +756,12 @@ class TestExecuteExit:
         trader = _make_trader(dry_run=True)
         pos = _make_position(entry_price=100_000_000, amount_krw=200_000)
         trader.positions.append(pos)
-        trader.current_price = 101_000_000  # +1%
+        trader.current_price = 101_000_000  # +1% raw
 
         trader.execute_exit(pos, "test exit")
         assert pos.exit_price == 101_000_000
-        assert pos.pnl_pct == pytest.approx(1.0, abs=0.01)
+        # pnl_pct = raw 1.0% - fee 0.1% = 0.9%
+        assert pos.pnl_pct == pytest.approx(0.9, abs=0.01)
         assert pos.exit_reason == "test exit"
         assert len(trader.positions) == 0
         assert len(trader.closed_positions) == 1
@@ -1452,39 +1455,41 @@ class TestPositionMonitoringExtra:
         """Multiple positions: one hits TP, another hits SL, third holds."""
         trader = _make_trader()
 
-        # Position 1: take profit
+        # Position 1: take profit (+1.0% raw - 0.1% fee = +0.9% net > 0.8% TP)
         pos_tp = _make_position(entry_price=100_000_000)
-        # Position 2: stop loss
+        # Position 2: stop loss (-0.9% raw - 0.1% fee = -1.0% net < -0.8% SL)
         pos_sl = _make_position(entry_price=102_000_000)
-        # Position 3: within bounds
+        # Position 3: within bounds (+0.5% raw - 0.1% fee = +0.4% net)
         pos_hold = _make_position(entry_price=100_500_000)
 
         trader.positions = [pos_tp, pos_sl, pos_hold]
-        trader.current_price = 100_900_000  # +0.9% from 100M, -1.08% from 102M, +0.4% from 100.5M
+        trader.current_price = 101_000_000  # +1.0% from 100M, -0.98% from 102M, +0.5% from 100.5M
 
         exits = trader.check_position_exit()
         exit_positions = [e[0] for e in exits]
 
-        assert pos_tp in exit_positions  # +0.9% >= 0.8% TP
-        assert pos_sl in exit_positions  # -1.08% <= -0.8% SL
-        assert pos_hold not in exit_positions  # +0.4% within bounds
+        assert pos_tp in exit_positions  # +0.9% - 0.1% fee = +0.8% net >= 0.8% TP
+        assert pos_sl in exit_positions  # -1.08% - 0.1% fee = -1.18% net <= -0.8% SL
+        assert pos_hold not in exit_positions  # +0.4% - 0.1% fee = +0.3% within bounds
 
     def test_exact_take_profit_boundary(self):
-        """Position at exactly the take profit percentage should trigger."""
+        """Position at exactly the take profit percentage (after fees) should trigger."""
         trader = _make_trader()
         pos = _make_position(entry_price=100_000_000)
         trader.positions.append(pos)
-        trader.current_price = 100_800_000  # Exactly +0.8%
+        # raw +0.91% - 0.1% fee = +0.81% net (just above 0.8% take-profit)
+        trader.current_price = 100_910_000
         exits = trader.check_position_exit()
         assert len(exits) == 1
         assert "익절" in exits[0][1]
 
     def test_exact_stop_loss_boundary(self):
-        """Position at exactly the stop loss percentage should trigger."""
+        """Position at exactly the stop loss percentage (after fees) should trigger."""
         trader = _make_trader()
         pos = _make_position(entry_price=100_000_000)
         trader.positions.append(pos)
-        trader.current_price = 99_200_000  # Exactly -0.8%
+        # raw -0.71% - 0.1% fee = -0.81% net (just below -0.8% stop-loss)
+        trader.current_price = 99_290_000
         exits = trader.check_position_exit()
         assert len(exits) == 1
         assert "손절" in exits[0][1]
@@ -1518,7 +1523,7 @@ class TestStrategyLoop:
         # Set up a position that should be closed (take profit)
         pos = _make_position(entry_price=100_000_000)
         trader.positions.append(pos)
-        trader.current_price = 100_900_000  # +0.9% triggers TP
+        trader.current_price = 101_000_000  # +1.0% raw - 0.1% fee = +0.9% net > 0.8% TP
 
         # Also set up a buy signal via news sentiment
         trader.news_sentiment_score = 0.6

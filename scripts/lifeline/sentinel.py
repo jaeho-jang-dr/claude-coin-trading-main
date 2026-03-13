@@ -324,6 +324,142 @@ def check_stale_locks() -> dict:
     return _result(component, "OK", f"락 파일 {len(lock_files)}개 (모두 정상)", details)
 
 
+def check_junk_files() -> dict:
+    """프로젝트 루트의 잔여/임시 파일을 점검한다."""
+    component = "junk_files"
+    junk_patterns = [
+        # (glob 패턴, 설명)
+        ("*.png", "스크린샷"),
+        ("download_*.py", "임시 다운로드 스크립트"),
+        ("claude-coin-trading-main", "clone 잔여물"),
+        (".claude/worktrees", "워크트리 잔여물"),
+    ]
+
+    found = []
+    for pattern, desc in junk_patterns:
+        matches = list(PROJECT_ROOT.glob(pattern))
+        # 디렉토리도 체크
+        p = PROJECT_ROOT / pattern
+        if p.exists() and p not in matches:
+            matches.append(p)
+        for m in matches:
+            # .gitignore에 있는 파일은 제외하지 않음 (정리 대상)
+            found.append({"path": str(m.relative_to(PROJECT_ROOT)), "type": desc})
+
+    details = {"junk_count": len(found), "files": found[:20]}
+
+    if len(found) > 5:
+        return _result(component, "WARNING", f"잔여 파일 {len(found)}개 발견 — 정리 필요", details)
+    if found:
+        return _result(component, "OK", f"잔여 파일 {len(found)}개 (허용 범위)", details)
+    return _result(component, "OK", "잔여 파일 없음", details)
+
+
+def check_bot_processes() -> dict:
+    """김치랑/초단타/대시보드 봇 프로세스 생존 여부를 점검한다."""
+    component = "bot_processes"
+
+    expected_bots = [
+        {"name": "kimchirang", "keyword": "kimchirang.main"},
+        {"name": "short_term", "keyword": "short_term_trader.py"},
+        {"name": "dashboard", "keyword": "dashboard.py"},
+    ]
+
+    alive = []
+    dead = []
+
+    for bot in expected_bots:
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["pgrep", "-f", bot["keyword"]],
+                capture_output=True, text=True, timeout=5,
+            )
+            pids = [int(p) for p in result.stdout.strip().split("\n") if p.strip()]
+            if pids:
+                alive.append({"name": bot["name"], "pids": pids})
+            else:
+                dead.append(bot["name"])
+        except Exception:
+            dead.append(bot["name"])
+
+    details = {"alive": alive, "dead": dead}
+
+    if dead:
+        return _result(component, "WARNING", f"중단된 봇: {', '.join(dead)}", details)
+    return _result(component, "OK", f"봇 {len(alive)}개 정상 실행 중", details)
+
+
+def check_git_status() -> dict:
+    """git 미추적/충돌 파일을 점검한다."""
+    component = "git_status"
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(PROJECT_ROOT),
+        )
+        lines = [l for l in result.stdout.strip().split("\n") if l.strip()]
+        untracked = [l[3:] for l in lines if l.startswith("??")]
+        conflicts = [l[3:] for l in lines if l.startswith("UU") or l.startswith("AA")]
+        modified = [l[3:] for l in lines if l.startswith(" M") or l.startswith("M ")]
+
+        details = {
+            "untracked": len(untracked),
+            "conflicts": len(conflicts),
+            "modified": len(modified),
+            "untracked_files": untracked[:10],
+            "conflict_files": conflicts[:5],
+        }
+
+        if conflicts:
+            return _result(component, "ERROR", f"git 충돌 {len(conflicts)}개 — 즉시 해결 필요", details)
+        if len(untracked) > 10:
+            return _result(component, "WARNING", f"미추적 파일 {len(untracked)}개 — 정리 또는 커밋 필요", details)
+        return _result(component, "OK", f"git 상태 정상 (미추적 {len(untracked)}, 수정 {len(modified)})", details)
+    except Exception as e:
+        return _result(component, "ERROR", f"git 상태 확인 실패: {e}", {"error": str(e)})
+
+
+def check_log_size() -> dict:
+    """로그 디렉토리 크기를 점검한다."""
+    component = "log_size"
+    logs_dir = PROJECT_ROOT / "logs"
+
+    if not logs_dir.exists():
+        return _result(component, "OK", "logs 디렉토리 없음", {"exists": False})
+
+    total_bytes = 0
+    file_count = 0
+    large_files = []
+
+    for f in logs_dir.rglob("*"):
+        if f.is_file():
+            try:
+                size = f.stat().st_size
+                total_bytes += size
+                file_count += 1
+                if size > 50 * 1024 * 1024:  # 50MB 이상
+                    large_files.append({
+                        "file": str(f.relative_to(PROJECT_ROOT)),
+                        "size_mb": round(size / (1024 * 1024), 1),
+                    })
+            except OSError:
+                pass
+
+    total_mb = total_bytes / (1024 * 1024)
+    details = {
+        "total_mb": round(total_mb, 1),
+        "file_count": file_count,
+        "large_files": large_files[:5],
+    }
+
+    if total_mb > 500:
+        return _result(component, "WARNING", f"로그 크기 과다: {total_mb:.0f}MB — 정리 필요", details)
+    return _result(component, "OK", f"로그 크기 정상: {total_mb:.0f}MB ({file_count}개 파일)", details)
+
+
 # ── 전체 점검 실행 ─────────────────────────────────────
 
 def run_all_checks() -> dict:
@@ -337,6 +473,10 @@ def run_all_checks() -> dict:
         check_rl_models(),
         check_emergency_flags(),
         check_stale_locks(),
+        check_junk_files(),
+        check_bot_processes(),
+        check_git_status(),
+        check_log_size(),
     ]
 
     # 최악 상태를 전체 상태로 결정

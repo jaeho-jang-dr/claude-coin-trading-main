@@ -41,7 +41,10 @@ class ConservativeAgent(BaseStrategyAgent):
         ind = self._extract_indicators(market_data)
         external_bonus = external_signal.get("strategy_bonus", 0)
         ai_score = market_data.get("ai_composite_signal", {}).get("score", 0)
-        fgi = market_data.get("fear_greed", {}).get("value", 50)
+        fgi_raw = market_data.get("fear_greed", {}).get("value")
+        fgi = int(fgi_raw) if fgi_raw is not None else 50
+        if fgi_raw is None:
+            print("[WARN] Conservative: FGI 데이터 없음 — 기본값 50 사용 (매수 점수 부정확할 수 있음)")
 
         # 뉴스 감성 판단
         news = market_data.get("news", {})

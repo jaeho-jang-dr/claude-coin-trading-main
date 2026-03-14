@@ -290,7 +290,13 @@ class Orchestrator:
     ) -> dict:
         """시장의 모든 지표를 하나의 상태 객체로 정리한다."""
         fgi = self._get_fgi(external_data)
-        rsi = market_data.get("indicators", {}).get("rsi_14", 50)
+        raw_rsi = market_data.get("indicators", {}).get("rsi_14")
+        if raw_rsi is not None:
+            rsi = raw_rsi
+            self.state["last_valid_rsi"] = rsi
+        else:
+            rsi = self.state.get("last_valid_rsi", 50)
+            print(f"[WARN] RSI 수집 실패 — {'마지막 성공값' if 'last_valid_rsi' in self.state else '기본값'} {rsi} 사용")
         price_change_24h = market_data.get("ticker", {}).get("signed_change_rate", 0) * 100
         btc_ratio = portfolio.get("btc_ratio", 0)
         if btc_ratio == 0:
@@ -803,11 +809,24 @@ class Orchestrator:
                 from datetime import datetime as _dt, timezone as _tz, timedelta as _td
                 _cycle_id = _dt.now(_tz(_td(hours=9))).strftime("%Y%m%d-%H%M") + "-agent"
 
+            # 전환 시 BTC 가격 기록 (성과 평가에 필수)
+            btc_price = 0
+            try:
+                price_resp = requests.get(
+                    "https://api.upbit.com/v1/ticker",
+                    params={"markets": "KRW-BTC"},
+                    timeout=5,
+                )
+                btc_price = int(price_resp.json()[0]["trade_price"])
+            except Exception:
+                pass
+
             row = {
                 "cycle_id": _cycle_id,
                 "from_agent": switch_info["from"],
                 "to_agent": switch_info["to"],
                 "reason": switch_info["reason"],
+                "price_at_switch": btc_price or None,
                 "fgi_at_switch": market_state.get("fgi"),
                 "rsi_at_switch": market_state.get("rsi"),
                 "price_change_24h": market_state.get("price_change_24h"),
@@ -881,7 +900,19 @@ class Orchestrator:
     def _get_fgi(self, external_data: dict) -> int:
         fg = external_data.get("sources", {}).get("fear_greed", {})
         current = fg.get("current", {})
-        return int(current.get("value", 50))
+        raw = current.get("value")
+        if raw is not None:
+            val = int(raw)
+            # 성공한 FGI를 state에 저장 (다음 실패 시 재사용)
+            self.state["last_valid_fgi"] = val
+            return val
+        # 수집 실패 → 마지막 성공값 사용, 그것도 없으면 50
+        fallback = self.state.get("last_valid_fgi")
+        if fallback is not None:
+            print(f"[WARN] FGI 수집 실패 — 마지막 성공값 {fallback} 사용")
+            return int(fallback)
+        print("[WARN] FGI 수집 실패 — 이전 성공값도 없어 기본값 50 사용")
+        return 50
 
     # ── 하락 컨텍스트 (매도 vs DCA 판단 핵심) ────────────
 

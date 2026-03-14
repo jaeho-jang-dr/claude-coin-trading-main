@@ -490,55 +490,67 @@ class MLWorker:
 
     # ── 결과 동기화 (수동 전용) ──
 
-    def _do_sync(self) -> tuple[int, int]:
-        """실제 동기화 로직. (업로드 건수, 전체 건수) 반환"""
+    def preview_sync(self) -> list[dict]:
+        """동기화 대상 파일을 미리보기 (업로드하지 않음)"""
         results_dir = PROJECT_DIR / "data" / "training_results"
         if not results_dir.exists():
-            return 0, 0
+            return []
 
-        # 마지막 동기화 시각
         sync_marker = results_dir / ".last_sync"
         last_sync_time = 0
         if sync_marker.exists():
             last_sync_time = sync_marker.stat().st_mtime
 
-        # 변경된 결과 파일만 수집
-        new_files = []
-        for f in results_dir.glob("*.json"):
+        previews = []
+        for f in sorted(results_dir.glob("*.json")):
             if f.name.startswith("."):
                 continue
             if f.stat().st_mtime > last_sync_time:
-                new_files.append(f)
+                try:
+                    with open(f) as fp:
+                        data = json.load(fp)
+                    previews.append({
+                        "file": f.name,
+                        "size_kb": round(f.stat().st_size / 1024, 1),
+                        "task_type": data.get("task_type", "unknown"),
+                        "created": datetime.fromtimestamp(
+                            f.stat().st_mtime, tz=KST
+                        ).strftime("%Y-%m-%d %H:%M"),
+                        "keys": list(data.keys()),
+                        "_path": f,
+                        "_data": data,
+                    })
+                except Exception:
+                    pass
 
-        if not new_files:
-            return 0, 0
+        return previews
+
+    def do_sync(self, previews: list[dict]) -> tuple[int, int]:
+        """확인된 파일만 실제 업로드"""
+        results_dir = PROJECT_DIR / "data" / "training_results"
+        sync_marker = results_dir / ".last_sync"
 
         uploaded = 0
-        for f in new_files:
+        for p in previews:
             try:
-                with open(f) as fp:
-                    result_data = json.load(fp)
-
                 record = {
                     "worker_id": self.worker_id,
-                    "task_type": result_data.get("task_type", "unknown"),
+                    "task_type": p["_data"].get("task_type", "unknown"),
                     "status": "completed",
-                    "result": json.dumps(result_data, default=str),
-                    "completed_at": datetime.fromtimestamp(
-                        f.stat().st_mtime, tz=KST
-                    ).isoformat(),
-                    "params": json.dumps(result_data.get("params", {})),
+                    "result": json.dumps(p["_data"], default=str),
+                    "completed_at": p["created"],
+                    "params": json.dumps(p["_data"].get("params", {})),
                 }
 
                 if self.db.insert("scalp_training_tasks", record):
                     uploaded += 1
             except Exception as e:
-                log.warning(f"결과 업로드 실패 ({f.name}): {e}")
+                log.warning(f"업로드 실패 ({p['file']}): {e}")
 
         if uploaded > 0:
             sync_marker.touch()
 
-        return uploaded, len(new_files)
+        return uploaded, len(previews)
 
     # ── 메인 루프 ──
 
@@ -615,7 +627,7 @@ def main():
         sys.exit(1)
 
     if args.sync:
-        # 수동 동기화 모드: 즉시 업로드 후 종료
+        # 수동 동기화 모드: 프리뷰 → 안내 → 확인 → 업로드
         worker = MLWorker(
             worker_id=args.worker_id,
             tier=args.tier,
@@ -624,11 +636,72 @@ def main():
         worker.register()
         if not worker.running:
             sys.exit(1)
-        uploaded, total = worker._do_sync()
-        if total == 0:
-            log.info("동기화할 새 결과 없음")
+
+        previews = worker.preview_sync()
+
+        if not previews:
+            print("\n  동기화할 새 결과가 없습니다.\n")
+            worker.go_offline()
+            return
+
+        # ── 데이터 프리뷰 ──
+        print()
+        print("=" * 60)
+        print("  결과 동기화 미리보기")
+        print("=" * 60)
+        print()
+        print(f"  워커 ID: {worker.worker_id}")
+        print(f"  티어: {worker.tier}")
+        print(f"  대상 파일: {len(previews)}건")
+        print()
+
+        total_kb = 0
+        for i, p in enumerate(previews, 1):
+            total_kb += p["size_kb"]
+            print(f"  [{i}] {p['file']}")
+            print(f"      유형: {p['task_type']}  |  크기: {p['size_kb']}KB  |  생성: {p['created']}")
+            # 데이터 키 미리보기 (어떤 정보가 포함되는지)
+            safe_keys = [k for k in p["keys"] if k not in ("_path", "_data")]
+            print(f"      포함 항목: {', '.join(safe_keys[:10])}")
+            print()
+
+        print("-" * 60)
+        print(f"  총 {len(previews)}건, {total_kb:.1f}KB")
+        print("-" * 60)
+
+        # ── 안전 안내 ──
+        print()
+        print("  [데이터 안전 안내]")
+        print()
+        print("  - 전송되는 데이터: 백테스트/학습 결과 (수치 데이터만)")
+        print("  - 전송되지 않는 데이터:")
+        print("      API 키, 비밀번호, 개인정보, .env 파일,")
+        print("      거래소 계정 정보, 잔고/포트폴리오 정보")
+        print("  - 전송 후에도 로컬 파일은 그대로 유지됩니다 (삭제 안 됨)")
+        print("  - 전송 대상: 프로젝트 공유 DB (Supabase)")
+        print("  - 전송된 데이터는 관리자가 조회할 수 있습니다")
+        print("  - 동기화를 취소해도 워커 실행에 영향 없습니다")
+        print()
+        print("-" * 60)
+
+        # ── 확인 ──
+        try:
+            answer = input("  동기화를 진행하시겠습니까? (y/N): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+
+        if answer not in ("y", "yes"):
+            print("\n  동기화를 취소했습니다. 로컬 데이터에 변경 없음.\n")
+            worker.go_offline()
+            return
+
+        uploaded, total = worker.do_sync(previews)
+        print()
+        if uploaded > 0:
+            print(f"  📤 동기화 완료: {uploaded}/{total}건 업로드")
         else:
-            log.info(f"📤 수동 동기화 완료: {uploaded}/{total}건 업로드")
+            print(f"  ⚠️  업로드 실패: 0/{total}건")
+        print(f"  로컬 파일은 그대로 유지됩니다.\n")
         worker.go_offline()
         return
 

@@ -62,7 +62,9 @@ def evaluate_model(model, env_class, candles, n_episodes=10, **env_kwargs):
     """모델 성능을 평가한다."""
     from stable_baselines3.common.evaluation import evaluate_policy
 
-    eval_env = env_class(candles=candles, crash_injection=False, **env_kwargs)
+    kwargs = {"crash_injection": False, "discrete_actions": True, "reward_clip": 2.0}
+    kwargs.update(env_kwargs)
+    eval_env = env_class(candles=candles, **kwargs)
     mean_reward, std_reward = evaluate_policy(model, eval_env, n_eval_episodes=n_episodes)
 
     # 상세 메트릭
@@ -121,20 +123,22 @@ def classify_candles_by_regime(candles: list[dict]) -> dict[str, list[dict]]:
 # ═══════════════════════════════════════════════════
 
 def phase1_anti_collapse(candles: list[dict], steps: int = 300_000):
-    """높은 엔트로피 + 행동 다양성 보상으로 새 모델을 처음부터 훈련."""
+    """이산 행동공간 + 보상 정규화로 정책 붕괴 근본 해결."""
     from stable_baselines3 import PPO
     from stable_baselines3.common.callbacks import EvalCallback
     from rl_hybrid.rl.environment_v2 import BitcoinTradingEnvV2
 
-    log("═══ Phase 1: 정책 붕괴 수정 ═══")
-    log(f"  엔트로피 0.15, 행동 다양성 보상, {steps:,} 스텝")
+    log("═══ Phase 1: 정책 붕괴 수정 (V2.1 — 이산 행동공간) ═══")
+    log(f"  이산 5행동(전량매도/매도/관망/매수/전량매수), 보상클리핑 [-2,2], {steps:,} 스텝")
 
-    # 훈련/평가 환경
+    # 훈련/평가 환경 — 이산 행동공간 사용
     train_env = BitcoinTradingEnvV2(
         candles=candles,
-        crash_injection=False,  # Phase 1에서는 정상 데이터로
+        crash_injection=False,
         anti_collapse=True,
         dca_reward=True,
+        discrete_actions=True,
+        reward_clip=2.0,
     )
 
     eval_candles = candles[int(len(candles) * 0.8):]
@@ -142,9 +146,11 @@ def phase1_anti_collapse(candles: list[dict], steps: int = 300_000):
         candles=eval_candles,
         crash_injection=False,
         anti_collapse=False,
+        discrete_actions=True,
+        reward_clip=2.0,
     )
 
-    # 새 모델 (높은 엔트로피)
+    # 새 모델 (이산 행동 + 높은 엔트로피)
     model = PPO(
         "MlpPolicy",
         train_env,
@@ -157,8 +163,8 @@ def phase1_anti_collapse(candles: list[dict], steps: int = 300_000):
         gae_lambda=0.95,
         clip_range=0.2,
         max_grad_norm=0.5,
-        policy_kwargs={"net_arch": [256, 256]},  # 더 큰 네트워크
-        verbose=0,
+        policy_kwargs={"net_arch": [256, 256]},
+        verbose=1,
     )
 
     # 평가 콜백
@@ -170,11 +176,11 @@ def phase1_anti_collapse(candles: list[dict], steps: int = 300_000):
         eval_freq=max(steps // 10, 10000),
         n_eval_episodes=5,
         deterministic=True,
-        verbose=0,
+        verbose=1,
     )
 
     t0 = time.time()
-    model.learn(total_timesteps=steps, callback=eval_callback, progress_bar=True)
+    model.learn(total_timesteps=steps, callback=eval_callback, progress_bar=False)
     elapsed = time.time() - t0
 
     # 저장
@@ -208,9 +214,11 @@ def phase2_crash_training(model, candles: list[dict], steps: int = 200_000):
     crash_env = BitcoinTradingEnvV2(
         candles=candles,
         crash_injection=True,
-        crash_prob=0.05,  # 5%씩 폭락 주입 (강화)
+        crash_prob=0.05,
         anti_collapse=True,
         dca_reward=True,
+        discrete_actions=True,
+        reward_clip=2.0,
     )
 
     model.set_env(crash_env)
@@ -219,7 +227,7 @@ def phase2_crash_training(model, candles: list[dict], steps: int = 200_000):
     model.learning_rate = 1e-4
 
     t0 = time.time()
-    model.learn(total_timesteps=steps, progress_bar=True)
+    model.learn(total_timesteps=steps, progress_bar=False)
     elapsed = time.time() - t0
 
     save_path = str(MODEL_DIR / "phase2_crash")
@@ -258,6 +266,8 @@ def phase3_external_data(model, candles: list[dict], steps: int = 200_000):
         crash_injection=False,
         anti_collapse=True,
         dca_reward=True,
+        discrete_actions=True,
+        reward_clip=2.0,
     )
 
     model.set_env(env)
@@ -265,7 +275,7 @@ def phase3_external_data(model, candles: list[dict], steps: int = 200_000):
     model.learning_rate = 5e-5
 
     t0 = time.time()
-    model.learn(total_timesteps=steps, progress_bar=True)
+    model.learn(total_timesteps=steps, progress_bar=False)
     elapsed = time.time() - t0
 
     save_path = str(MODEL_DIR / "phase3_external")
@@ -301,17 +311,19 @@ def phase4_regime_specific(model, candles: list[dict], steps_per_regime: int = 1
 
         env = BitcoinTradingEnvV2(
             candles=regime_candles,
-            crash_injection=(regime_name == "bear"),  # 하락장에만 폭락 추가
+            crash_injection=(regime_name == "bear"),
             anti_collapse=True,
             dca_reward=True,
+            discrete_actions=True,
+            reward_clip=2.0,
         )
 
-        # 국면별 모델 복사 + 미세조정
+        # 국면별 모델 복사 + 미세조정 (메인 모델 이어서 학습)
         regime_model = PPO.load(str(MODEL_DIR / "phase3_external"), env=env)
         regime_model.ent_coef = 0.05
         regime_model.learning_rate = 3e-5
 
-        regime_model.learn(total_timesteps=steps_per_regime, progress_bar=True)
+        regime_model.learn(total_timesteps=steps_per_regime, progress_bar=False)
 
         save_path = str(MODEL_DIR / f"phase4_{regime_name}")
         regime_model.save(save_path)
@@ -329,12 +341,14 @@ def phase4_regime_specific(model, candles: list[dict], steps_per_regime: int = 1
         crash_prob=0.02,
         anti_collapse=True,
         regime_aware=True,
+        discrete_actions=True,
+        reward_clip=2.0,
     )
     model.set_env(full_env)
     model.ent_coef = 0.06
     model.learning_rate = 3e-5
 
-    model.learn(total_timesteps=steps_per_regime, progress_bar=True)
+    model.learn(total_timesteps=steps_per_regime, progress_bar=False)
 
     save_path = str(MODEL_DIR / "phase4_regime_aware")
     model.save(save_path)
@@ -362,7 +376,9 @@ def phase5_dca_stoploss(model, candles: list[dict], steps: int = 150_000):
         crash_injection=True,
         crash_prob=0.03,
         anti_collapse=True,
-        dca_reward=True,  # DCA 보상 강화
+        dca_reward=True,
+        discrete_actions=True,
+        reward_clip=2.0,
     )
 
     model.set_env(env)
@@ -370,7 +386,7 @@ def phase5_dca_stoploss(model, candles: list[dict], steps: int = 150_000):
     model.learning_rate = 3e-5
 
     t0 = time.time()
-    model.learn(total_timesteps=steps, progress_bar=True)
+    model.learn(total_timesteps=steps, progress_bar=False)
     elapsed = time.time() - t0
 
     save_path = str(MODEL_DIR / "phase5_dca")
@@ -403,6 +419,8 @@ def phase6_time_patterns(model, candles: list[dict], steps: int = 150_000):
         anti_collapse=True,
         dca_reward=True,
         regime_aware=True,
+        discrete_actions=True,
+        reward_clip=2.0,
     )
 
     model.set_env(env)
@@ -410,7 +428,7 @@ def phase6_time_patterns(model, candles: list[dict], steps: int = 150_000):
     model.learning_rate = 2e-5
 
     t0 = time.time()
-    model.learn(total_timesteps=steps, progress_bar=True)
+    model.learn(total_timesteps=steps, progress_bar=False)
     elapsed = time.time() - t0
 
     # 최종 모델 저장
@@ -496,14 +514,14 @@ def main():
     total_steps = 0
     model = None
 
-    # Phase별 기본 스텝 수
+    # Phase별 기본 스텝 수 (V2.2: 스텝 수 증가)
     default_steps = {
-        1: 300_000,
-        2: 200_000,
-        3: 200_000,
-        4: 100_000,  # per regime
-        5: 150_000,
-        6: 150_000,
+        1: 500_000,
+        2: 300_000,
+        3: 300_000,
+        4: 150_000,  # per regime
+        5: 200_000,
+        6: 200_000,
     }
 
     run_phase = args.phase  # 0이면 전체
@@ -523,7 +541,7 @@ def main():
             from rl_hybrid.rl.environment_v2 import BitcoinTradingEnvV2
             p1_path = str(MODEL_DIR / "phase1_anti_collapse.zip")
             if Path(p1_path).exists():
-                env = BitcoinTradingEnvV2(candles=candles)
+                env = BitcoinTradingEnvV2(candles=candles, discrete_actions=True, reward_clip=2.0)
                 model = PPO.load(p1_path, env=env)
             else:
                 log("[WARN] Phase 1 모델 없음, Phase 1부터 실행 필요")
@@ -540,7 +558,7 @@ def main():
             from rl_hybrid.rl.environment_v2 import BitcoinTradingEnvV2
             p2_path = str(MODEL_DIR / "phase2_crash.zip")
             if Path(p2_path).exists():
-                env = BitcoinTradingEnvV2(candles=candles)
+                env = BitcoinTradingEnvV2(candles=candles, discrete_actions=True, reward_clip=2.0)
                 model = PPO.load(p2_path, env=env)
             else:
                 log("[WARN] 이전 Phase 모델 없음")
@@ -557,7 +575,7 @@ def main():
             from rl_hybrid.rl.environment_v2 import BitcoinTradingEnvV2
             p3_path = str(MODEL_DIR / "phase3_external.zip")
             if Path(p3_path).exists():
-                env = BitcoinTradingEnvV2(candles=candles)
+                env = BitcoinTradingEnvV2(candles=candles, discrete_actions=True, reward_clip=2.0)
                 model = PPO.load(p3_path, env=env)
             else:
                 log("[WARN] 이전 Phase 모델 없음")
@@ -574,7 +592,7 @@ def main():
             from rl_hybrid.rl.environment_v2 import BitcoinTradingEnvV2
             p4_path = str(MODEL_DIR / "phase4_regime_aware.zip")
             if Path(p4_path).exists():
-                env = BitcoinTradingEnvV2(candles=candles)
+                env = BitcoinTradingEnvV2(candles=candles, discrete_actions=True, reward_clip=2.0)
                 model = PPO.load(p4_path, env=env)
             else:
                 log("[WARN] 이전 Phase 모델 없음")
@@ -591,7 +609,7 @@ def main():
             from rl_hybrid.rl.environment_v2 import BitcoinTradingEnvV2
             p5_path = str(MODEL_DIR / "phase5_dca.zip")
             if Path(p5_path).exists():
-                env = BitcoinTradingEnvV2(candles=candles)
+                env = BitcoinTradingEnvV2(candles=candles, discrete_actions=True, reward_clip=2.0)
                 model = PPO.load(p5_path, env=env)
             else:
                 log("[WARN] 이전 Phase 모델 없음")

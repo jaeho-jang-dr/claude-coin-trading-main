@@ -245,9 +245,20 @@ class BitcoinTradingEnvV2(gym.Env):
       - 시장 국면 라벨링
       - DCA 단계적 진입 보상
       - 주말/야간 패턴 반영
+      - 이산 행동공간 옵션 (정책 붕괴 근본 해결)
     """
 
     metadata = {"render_modes": ["human"]}
+
+    # 이산 행동 매핑: BTC 목표 비중
+    DISCRETE_ACTIONS = {
+        0: 0.0,    # 전량 매도 (100% 현금)
+        1: 0.25,   # 매도 (25% BTC)
+        2: 0.50,   # 관망/중립 (50% BTC)
+        3: 0.75,   # 매수 (75% BTC)
+        4: 1.0,    # 전량 매수 (100% BTC)
+    }
+    DISCRETE_ACTION_NAMES = ["전량매도", "매도", "관망", "매수", "전량매수"]
 
     def __init__(
         self,
@@ -262,6 +273,9 @@ class BitcoinTradingEnvV2(gym.Env):
         regime_aware: bool = True,
         dca_reward: bool = True,
         anti_collapse: bool = True,
+        # V2.1 옵션 — 정책 붕괴 근본 해결
+        discrete_actions: bool = False,
+        reward_clip: float = 2.0,
     ):
         super().__init__()
 
@@ -283,13 +297,20 @@ class BitcoinTradingEnvV2(gym.Env):
         self.dca_reward = dca_reward
         self.anti_collapse = anti_collapse
 
+        # V2.1 옵션
+        self.discrete_actions = discrete_actions
+        self.reward_clip = reward_clip
+
         # 공간 정의 (42차원 유지 — 기존 모델 호환)
         self.observation_space = spaces.Box(
             low=0.0, high=1.0, shape=(OBSERVATION_DIM,), dtype=np.float32
         )
-        self.action_space = spaces.Box(
-            low=-1.0, high=1.0, shape=(1,), dtype=np.float32
-        )
+        if discrete_actions:
+            self.action_space = spaces.Discrete(5)
+        else:
+            self.action_space = spaces.Box(
+                low=-1.0, high=1.0, shape=(1,), dtype=np.float32
+            )
 
         self.encoder = StateEncoder()
         self.reward_calc = RewardCalculator()
@@ -347,12 +368,17 @@ class BitcoinTradingEnvV2(gym.Env):
         return obs, {"regime": self.regime}
 
     def step(self, action):
-        action_val = float(np.clip(action[0], -1.0, 1.0))
+        # 이산/연속 행동공간 처리
+        if self.discrete_actions:
+            action_idx = int(action)
+            target_btc_ratio = self.DISCRETE_ACTIONS[action_idx]
+            action_val = target_btc_ratio * 2 - 1  # [0,1] → [-1,1] 매핑
+        else:
+            action_val = float(np.clip(action[0], -1.0, 1.0))
+            target_btc_ratio = (action_val + 1) / 2
+
         price = self.candles[self.current_step]["close"]
         prev_value = self._portfolio_value(price)
-
-        # 행동 실행 (v1과 동일)
-        target_btc_ratio = (action_val + 1) / 2
         current_btc_value = self.btc_balance * price
         total_value = self._portfolio_value(price)
         target_btc_value = total_value * target_btc_ratio
@@ -415,22 +441,25 @@ class BitcoinTradingEnvV2(gym.Env):
         )
         reward = reward_info["reward"] if isinstance(reward_info, dict) else float(reward_info)
 
-        # [개선 1] 정책 붕괴 방지 — 행동 다양성 보상
+        # [개선 1] 정책 붕괴 방지 — V2.2: 수익성 중심으로 재설계
         if self.anti_collapse:
-            # 너무 오래 거래 안 하면 페널티 강화
-            if self.steps_no_trade > 8:
-                reward -= 0.02 * (self.steps_no_trade - 8)
+            # 거래 안 하면 약한 페널티 (10스텝부터, 최대 -0.2)
+            if self.steps_no_trade > 10:
+                penalty = min(0.2, 0.03 * (self.steps_no_trade - 10))
+                reward -= penalty
 
-            # 거래 실행 시 보너스 (수익성과 무관)
+            # 거래 보너스: 수익성 기반 (무조건 → 조건부)
             if traded:
-                reward += 0.08
+                step_return = (new_value - prev_value) / prev_value
+                if step_return > 0:
+                    reward += 0.2   # 수익 거래: 강한 보상
+                else:
+                    reward += 0.02  # 손실 거래: 미약한 보상 (붕괴 방지)
 
-            # 행동 변화 보너스 (같은 행동 반복 시 감소)
-            if len(self.action_history) >= 3:
-                recent = self.action_history[-3:]
-                action_std = np.std(recent)
-                if action_std > 0.1:
-                    reward += 0.03  # 다양한 행동
+            # 에피소드 초반 거래 0이면 약한 페널티
+            ep_progress = (self.current_step - self.start_idx)
+            if ep_progress > 30 and self.trade_count == 0:
+                reward -= 0.1
 
         # [개선 2] 폭락 대응 보상
         price_change = (new_price - price) / price
@@ -480,8 +509,11 @@ class BitcoinTradingEnvV2(gym.Env):
 
         # 파산 체크
         if new_value < self.initial_balance * 0.1:
-            reward = -1.0
+            reward = -self.reward_clip
             terminated = True
+
+        # 보상 클리핑 — 극단값 방지 (V2.1)
+        reward = float(np.clip(reward, -self.reward_clip, self.reward_clip))
 
         obs = self._get_observation()
         info = {
@@ -491,7 +523,7 @@ class BitcoinTradingEnvV2(gym.Env):
             "profit_pct": (new_value - self.initial_balance) / self.initial_balance * 100,
         }
 
-        return obs, float(reward), terminated, truncated, info
+        return obs, reward, terminated, truncated, info
 
     def _portfolio_value(self, price: float) -> float:
         return self.krw_balance + self.btc_balance * price

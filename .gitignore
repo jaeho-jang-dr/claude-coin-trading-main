@@ -2,6 +2,9 @@
 .env
 .env.*
 !.env.example
+!.env.owner
+!.env.coworker
+!.env.collaborator
 .supabase_token
 .venv/
 venv/

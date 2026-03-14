@@ -34,7 +34,9 @@ load_dotenv(PROJECT_DIR / ".env")
 
 KST = timezone(timedelta(hours=9))
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+# Owner: SERVICE_ROLE_KEY (bypasses RLS), Non-owner: ANON_KEY (RLS enforced)
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "") or os.getenv("SUPABASE_ANON_KEY", "")
+WORKER_TOKEN = os.getenv("WORKER_TOKEN", "")  # Non-owner workers: per-worker UUID token
 
 logging.basicConfig(
     level=logging.INFO,
@@ -81,6 +83,9 @@ class SupabaseClient:
             "Authorization": f"Bearer {SUPABASE_KEY}",
             "Content-Type": "application/json",
         }
+        # Non-owner workers: RLS token for tier-based access control
+        if WORKER_TOKEN:
+            self.headers["x-worker-token"] = WORKER_TOKEN
 
     def get(self, table: str, params: dict) -> list[dict]:
         try:
@@ -607,6 +612,334 @@ class MLWorker:
         log.info(f"워커 종료 (완료: {self.tasks_completed}, 실패: {self.tasks_failed})")
 
 
+def self_register(args):
+    """초대코드로 자가등록 — 토큰은 본인만 확인 가능"""
+    import uuid as _uuid
+
+    invite_code = args.invite_code
+    if not invite_code:
+        invite_code = input("초대코드를 입력하세요: ").strip()
+
+    if not invite_code:
+        print("초대코드가 필요합니다.")
+        sys.exit(1)
+
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    # 1. 초대코드 유효성 확인
+    resp = requests.get(
+        f"{SUPABASE_URL}/rest/v1/worker_invites",
+        params={"select": "*", "invite_code": f"eq.{invite_code}"},
+        headers=headers,
+        timeout=15,
+    )
+    if not resp.ok or not resp.json():
+        print("유효하지 않은 초대코드입니다.")
+        sys.exit(1)
+
+    invite = resp.json()[0]
+
+    # 만료 체크
+    from datetime import datetime, timezone
+    expires = datetime.fromisoformat(invite["expires_at"])
+    if expires.astimezone(timezone.utc) < datetime.now(timezone.utc):
+        print("초대코드가 만료되었습니다. 관리자에게 새 코드를 요청하세요.")
+        sys.exit(1)
+
+    # 이미 사용된 코드
+    if invite.get("used_at"):
+        print("이미 사용된 초대코드입니다.")
+        sys.exit(1)
+
+    tier = invite["tier"]
+    invite_name = invite.get("worker_name", "")
+
+    # 2. 워커 정보 입력
+    print(f"\n초대코드 확인 완료: {tier} 티어")
+    if invite_name:
+        print(f"등록 이름: {invite_name}")
+
+    worker_id = args.worker_id or input("워커 ID를 입력하세요 (예: my-pc): ").strip()
+    if not worker_id:
+        worker_id = platform.node()
+    worker_name = args.worker_name or invite_name
+
+    # 필수 정보 수집 (오너가 관리에 필요)
+    if not worker_name:
+        worker_name = input("닉네임을 입력하세요 (필수): ").strip()
+    if not worker_name:
+        print("닉네임은 필수입니다.")
+        sys.exit(1)
+
+    tg_chat_id = getattr(args, 'telegram_id', None)
+    if not tg_chat_id:
+        tg_chat_id = input("텔레그램 chat_id를 입력하세요 (필수, 숫자): ").strip()
+    if not tg_chat_id:
+        print("텔레그램 chat_id는 필수입니다. @userinfobot 에서 확인하세요.")
+        sys.exit(1)
+
+    reg_email = getattr(args, 'email', None) or invite.get("email", "")
+    if not reg_email:
+        reg_email = input("이메일을 입력하세요 (필수): ").strip()
+    if not reg_email:
+        print("이메일은 필수입니다.")
+        sys.exit(1)
+
+    # 이미 등록된 worker_id 체크
+    resp2 = requests.get(
+        f"{SUPABASE_URL}/rest/v1/compute_workers",
+        params={"select": "worker_id", "worker_id": f"eq.{worker_id}"},
+        headers=headers,
+        timeout=15,
+    )
+    if resp2.ok and resp2.json():
+        print(f"'{worker_id}'는 이미 등록되어 있습니다. 다른 ID를 사용하세요.")
+        sys.exit(1)
+
+    # 3. 토큰 생성 + 워커 등록 (토큰은 여기서만 표시)
+    new_token = str(_uuid.uuid4())
+
+    # 시스템 정보 수집
+    ram_gb = 0
+    try:
+        import psutil
+        ram_gb = round(psutil.virtual_memory().total / (1024**3))
+    except ImportError:
+        pass
+
+    gpu_info = None
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            gpu_info = r.stdout.strip().split("\n")[0]
+    except Exception:
+        pass
+
+    worker_data = {
+        "worker_id": worker_id,
+        "worker_name": worker_name,
+        "tier": tier,
+        "status": "offline",
+        "is_main_brain": tier == "owner",
+        "api_token": new_token,
+        "platform": platform.system(),
+        "architecture": platform.machine(),
+        "ram_gb": ram_gb or None,
+        "cpu_info": platform.processor() or None,
+        "gpu_info": gpu_info,
+        "python_version": platform.python_version(),
+        "telegram_chat_id": tg_chat_id,
+        "email": reg_email,
+        "notes": f"자가등록: {datetime.now(KST).strftime('%Y-%m-%d %H:%M')} (초대 {invite_code})",
+    }
+
+    resp3 = requests.post(
+        f"{SUPABASE_URL}/rest/v1/compute_workers",
+        json=worker_data,
+        headers={**headers, "Prefer": "return=minimal"},
+        timeout=15,
+    )
+
+    if resp3.status_code >= 300:
+        print(f"등록 실패: {resp3.text}")
+        sys.exit(1)
+
+    # 4. 초대코드 사용 처리
+    requests.patch(
+        f"{SUPABASE_URL}/rest/v1/worker_invites",
+        params={"invite_code": f"eq.{invite_code}"},
+        json={
+            "used_at": datetime.now(KST).isoformat(),
+            "used_by_worker_id": worker_id,
+        },
+        headers={**headers, "Prefer": "return=minimal"},
+        timeout=15,
+    )
+
+    # 5. 결과 출력 — 토큰은 이 순간에만 표시
+    print()
+    print("=" * 60)
+    print("  등록 완료!")
+    print("=" * 60)
+    print()
+    print(f"  워커 ID:    {worker_id}")
+    print(f"  이름:       {worker_name}")
+    print(f"  티어:       {tier}")
+    print(f"  플랫폼:     {platform.system()} {platform.machine()}")
+    if ram_gb:
+        print(f"  RAM:        {ram_gb}GB")
+    if gpu_info:
+        print(f"  GPU:        {gpu_info}")
+    print()
+    print("  *** 아래 토큰을 .env 파일에 저장하세요 ***")
+    print(f"  WORKER_TOKEN={new_token}")
+    print()
+    print("  이 토큰은 다시 표시되지 않습니다.")
+    print("  분실 시 관리자에게 재등록을 요청하세요.")
+    print()
+    print(f"  워커 실행: python -m scalp_ml.worker --worker-id \"{worker_id}\" --tier {tier}")
+    print("=" * 60)
+
+
+def cmd_contacts(args):
+    """등록된 연락처 목록 조회 (모든 티어 가능)"""
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+    if WORKER_TOKEN:
+        headers["x-worker-token"] = WORKER_TOKEN
+
+    resp = requests.get(
+        f"{SUPABASE_URL}/rest/v1/telegram_contacts",
+        params={"select": "name,role,aliases",
+                "is_active": "eq.true",
+                "order": "role.asc,name.asc"},
+        headers=headers, timeout=15,
+    )
+
+    if not resp.ok:
+        print(f"조회 실패: {resp.status_code} {resp.text}")
+        return
+
+    contacts = resp.json()
+    if not contacts:
+        print("등록된 연락처가 없습니다")
+        return
+
+    print(f"\n{'이름':<16} {'별명':<16} {'역할'}")
+    print("-" * 50)
+    for c in contacts:
+        aliases = ", ".join(c.get("aliases") or []) or "-"
+        print(f"{c['name']:<16} {aliases:<16} {c['role']}")
+    print(f"\n총 {len(contacts)}명")
+
+
+def cmd_send_msg(args):
+    """등록된 사용자에게 텔레그램 메시지 발송"""
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+    if WORKER_TOKEN:
+        headers["x-worker-token"] = WORKER_TOKEN
+
+    # 수신자 조회 (이름 또는 별명)
+    target = None
+    for param_key, param_val in [
+        ("name", f"eq.{args.to}"),
+        ("aliases", f"cs.{{{args.to}}}"),
+    ]:
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/telegram_contacts",
+            params={"select": "chat_id,name,role",
+                    param_key: param_val, "is_active": "eq.true"},
+            headers=headers, timeout=10,
+        )
+        if resp.ok and resp.json():
+            target = resp.json()[0]
+            break
+
+    if not target:
+        print(f"'{args.to}'을(를) 찾을 수 없습니다. --contacts 로 목록을 확인하세요.")
+        return
+
+    # 발신자 이름 조회
+    sender_name = args.worker_id or platform.node()
+    my_resp = requests.get(
+        f"{SUPABASE_URL}/rest/v1/telegram_contacts",
+        params={"select": "name",
+                "or": f"(worker_id.eq.{sender_name},name.eq.{sender_name})",
+                "is_active": "eq.true"},
+        headers=headers, timeout=10,
+    )
+    if my_resp.ok and my_resp.json():
+        sender_name = my_resp.json()[0]["name"]
+
+    # 텔레그램 발송 (봇 토큰은 .env에 있는 경우만)
+    tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    if not tg_token:
+        # 봇 토큰 없으면 DB에 메시지만 기록 (listener가 전달)
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/telegram_messages",
+            json={"chat_id": target["chat_id"], "direction": "incoming",
+                  "message": f"[{sender_name}] {args.message}",
+                  "worker_name": sender_name},
+            headers={**headers, "Prefer": "return=minimal"},
+            timeout=10,
+        )
+        print(f"메시지 저장 완료 (봇 토큰 없음 — listener가 전달 예정)")
+        return
+
+    r = requests.post(
+        f"https://api.telegram.org/bot{tg_token}/sendMessage",
+        json={"chat_id": target["chat_id"],
+              "text": f"[{sender_name}] {args.message}"},
+        timeout=15,
+    )
+    if r.ok:
+        print(f"전송 완료: {target['name']} [{target['role']}]")
+        # 기록
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/telegram_messages",
+            json={"chat_id": target["chat_id"], "direction": "incoming",
+                  "message": f"[{sender_name}] {args.message}",
+                  "worker_name": sender_name},
+            headers={**headers, "Prefer": "return=minimal"},
+            timeout=10,
+        )
+    else:
+        print(f"전송 실패: {r.text}")
+
+
+def cmd_my_inbox(args):
+    """내 수신 메시지 확인"""
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+    if WORKER_TOKEN:
+        headers["x-worker-token"] = WORKER_TOKEN
+
+    resp = requests.get(
+        f"{SUPABASE_URL}/rest/v1/telegram_messages",
+        params={"select": "worker_name,message,is_read,created_at",
+                "direction": "eq.incoming",
+                "order": "created_at.desc",
+                "limit": str(args.limit or 20)},
+        headers=headers, timeout=15,
+    )
+
+    if not resp.ok:
+        print(f"조회 실패: {resp.status_code}")
+        return
+
+    messages = resp.json()
+    if not messages:
+        print("수신된 메시지가 없습니다")
+        return
+
+    print(f"\n{'시간':<18} {'발신자':<16} {'메시지'}")
+    print("-" * 60)
+    for m in messages:
+        ts = datetime.fromisoformat(m["created_at"]).astimezone(KST).strftime("%m-%d %H:%M")
+        sender = m.get("worker_name") or "?"
+        text = m["message"][:40] + ("..." if len(m["message"]) > 40 else "")
+        new = " *" if not m.get("is_read") else ""
+        print(f"{ts:<18} {sender:<16} {text}{new}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="ML 학습 워커 데몬")
     parser.add_argument("--worker-id", default=platform.node(),
@@ -620,10 +953,57 @@ def main():
                         help="폴링 간격 (초, 기본: 30)")
     parser.add_argument("--sync", action="store_true",
                         help="결과를 즉시 동기화하고 종료 (수동 전송)")
+    parser.add_argument("--register", action="store_true",
+                        help="초대코드로 자가등록 (토큰 자동 발급)")
+    parser.add_argument("--invite-code", default=None,
+                        help="관리자로부터 받은 초대코드")
+    parser.add_argument("--telegram-id", default=None,
+                        help="텔레그램 chat_id (숫자, @userinfobot에서 확인)")
+    parser.add_argument("--email", default=None,
+                        help="이메일 주소")
+    parser.add_argument("--contacts", action="store_true",
+                        help="등록된 연락처 목록 조회")
+    parser.add_argument("--msg-to", default=None,
+                        help="메시지 수신자 (이름 또는 별명)")
+    parser.add_argument("--message", "-m", default=None,
+                        help="전송할 메시지 내용")
+    parser.add_argument("--inbox", action="store_true",
+                        help="내 수신 메시지 확인")
+    parser.add_argument("--limit", type=int, default=20,
+                        help="inbox 표시 개수 (기본 20)")
     args = parser.parse_args()
 
     if not SUPABASE_URL or not SUPABASE_KEY:
-        log.error("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 미설정")
+        log.error("SUPABASE_URL / SUPABASE_ANON_KEY (또는 SERVICE_ROLE_KEY) 미설정")
+        sys.exit(1)
+
+    # ── 자가등록 모드 ──
+    if args.register:
+        self_register(args)
+        return
+
+    # ── 연락처 조회 ──
+    if args.contacts:
+        cmd_contacts(args)
+        return
+
+    # ── 메시지 발송 ──
+    if args.msg_to:
+        if not args.message:
+            print("메시지 내용이 필요합니다: -m \"내용\"")
+            sys.exit(1)
+        args.to = args.msg_to
+        cmd_send_msg(args)
+        return
+
+    # ── 수신함 ──
+    if args.inbox:
+        cmd_my_inbox(args)
+        return
+
+    # Non-owner: ANON_KEY + WORKER_TOKEN 필수
+    if not os.getenv("SUPABASE_SERVICE_ROLE_KEY") and not WORKER_TOKEN:
+        log.error("WORKER_TOKEN 미설정 — 초대코드로 등록하세요: --register --invite-code <코드>")
         sys.exit(1)
 
     if args.sync:

@@ -37,6 +37,8 @@ class KimchirangNotifier:
         self._enabled = bool(
             os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_USER_ID")
         )
+        # 상태 보고만 별도 비활성화 (진입/청산/손절/에러는 유지)
+        self._status_enabled = os.getenv("KR_TELEGRAM_STATUS", "true").lower() == "true"
         if not self._enabled:
             logger.warning("텔레그램 미설정 -- 알림 비활성화")
         self._last_send_time = 0.0
@@ -154,7 +156,9 @@ class KimchirangNotifier:
         await self._send("error", "Kimchirang 오류", body)
 
     async def notify_status(self, stats: dict, position: dict):
-        """주기적 상태 보고"""
+        """주기적 상태 보고 (KR_TELEGRAM_STATUS=false 시 스킵)"""
+        if not self._status_enabled:
+            return
         side = position.get("side", "none")
         kp = stats.get("mid_kp", 0)
         z = stats.get("kp_z_score", 0)

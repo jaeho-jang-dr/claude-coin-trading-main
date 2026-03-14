@@ -1195,6 +1195,52 @@ class ShortTermTrader:
             "dry_run": self.dry_run,
         })
 
+        # decisions 테이블 기록 (RL 훈련 데이터용 — 매수 결정)
+        entry_reason = (
+            f"[초단타-{pos.strategy}] {getattr(pos, '_signal_reason', '')} | "
+            f"추세={self._market_trend} RSI={self._rsi:.1f} FGI={self._fgi}"
+        )
+        db_insert("decisions", {
+            "market": MARKET,
+            "decision": "매수",
+            "confidence": getattr(pos, '_confidence', 0.5),
+            "reason": entry_reason,
+            "current_price": int(pos.entry_price),
+            "trade_amount": int(pos.amount_krw),
+            "rsi_value": round(self._rsi, 2),
+            "fear_greed_value": self._fgi,
+            "sma20_price": int(self._sma20) if self._sma20 else None,
+            "executed": not self.dry_run,
+            "source": "short_term",
+            "cycle_id": self.cycle_id,
+            "dry_run": self.dry_run,
+            "created_at": pos.entry_time.isoformat(),
+        })
+
+        # decisions 테이블 기록 (RL 훈련 데이터용 — 매도 결정)
+        exit_reason_full = (
+            f"[초단타-{pos.strategy}] {reason} | "
+            f"진입 {pos.entry_price:,.0f} → 청산 {exit_price:,.0f} | "
+            f"손익 {pnl_pct:+.2f}% ({pnl_krw:+,.0f}원)"
+        )
+        db_insert("decisions", {
+            "market": MARKET,
+            "decision": "매도",
+            "confidence": getattr(pos, '_confidence', 0.5),
+            "reason": exit_reason_full,
+            "current_price": int(exit_price),
+            "trade_amount": int(pos.amount_krw),
+            "trade_volume": float(pos.btc_qty),
+            "rsi_value": round(self._rsi, 2),
+            "fear_greed_value": self._fgi,
+            "sma20_price": int(self._sma20) if self._sma20 else None,
+            "executed": not self.dry_run,
+            "profit_loss": round(pnl_pct, 3),
+            "source": "short_term",
+            "cycle_id": self.cycle_id,
+            "dry_run": self.dry_run,
+        })
+
         send_telegram(
             f"<b>[초단타 매도]</b> {pos.strategy}\n"
             f"사유: {reason}\n"
@@ -1308,6 +1354,171 @@ class ShortTermTrader:
                 f"  뉴스 감성: {self.last_news_sentiment} ({self.news_sentiment_score:+.2f})\n"
                 f"  고래 버퍼: {len(self.whale_recent)}건"
             )
+
+    async def settlement_reporter(self):
+        """6시간 간격 정산 리포트 — DB 기록 + 텔레그램 알림 + 훈련 일지"""
+        SETTLEMENT_INTERVAL = 6 * 3600  # 6시간
+        self._settlement_start = time.time()
+        self._settlement_epoch = 0  # 정산 회차
+        self._prev_settled_count = 0  # 이전 정산까지 처리된 거래 수
+        self._prev_settled_pnl = 0.0  # 이전 정산까지 누적 PnL
+
+        while self.running:
+            await asyncio.sleep(SETTLEMENT_INTERVAL)
+            self._settlement_epoch += 1
+            try:
+                await self._do_settlement()
+            except Exception as e:
+                log.error(f"정산 리포트 에러: {e}")
+
+    async def _do_settlement(self):
+        """6시간 정산 실행"""
+        now = datetime.now(KST)
+        epoch = self._settlement_epoch
+        elapsed_h = (time.time() - self._settlement_start) / 3600
+
+        # 이번 정산 구간의 거래만 추출
+        current_count = len(self.closed_positions)
+        period_trades = self.closed_positions[self._prev_settled_count:]
+        period_count = len(period_trades)
+        period_wins = sum(1 for p in period_trades if (p.pnl_pct or 0) > 0)
+        period_losses = sum(1 for p in period_trades if (p.pnl_pct or 0) < 0)
+        period_even = period_count - period_wins - period_losses
+        period_pnl = sum(p.amount_krw * (p.pnl_pct or 0) / 100 for p in period_trades)
+        period_win_rate = period_wins / max(period_count, 1) * 100
+
+        # 전략별 성과 분석
+        strategy_stats: dict[str, dict] = {}
+        for p in period_trades:
+            s = p.strategy
+            if s not in strategy_stats:
+                strategy_stats[s] = {"count": 0, "wins": 0, "pnl": 0.0, "reasons": []}
+            strategy_stats[s]["count"] += 1
+            if (p.pnl_pct or 0) > 0:
+                strategy_stats[s]["wins"] += 1
+            strategy_stats[s]["pnl"] += p.amount_krw * (p.pnl_pct or 0) / 100
+            if p.exit_reason:
+                strategy_stats[s]["reasons"].append(p.exit_reason[:60])
+
+        # 수수료 분석
+        total_volume = sum(p.amount_krw for p in period_trades) * 2  # 매수+매도
+        total_fee_est = total_volume * COMMISSION_PCT / 100
+        gross_pnl = sum(
+            p.amount_krw * ((p.exit_price - p.entry_price) / p.entry_price * 100) / 100
+            for p in period_trades if p.exit_price
+        )
+
+        # 누적 통계
+        cumul_count = current_count
+        cumul_pnl = self.daily_pnl
+
+        # 훈련 일지 메시지 생성
+        strat_detail = ""
+        for s, st in strategy_stats.items():
+            wr = st["wins"] / max(st["count"], 1) * 100
+            strat_detail += f"\n  [{s}] {st['count']}건, 승률 {wr:.0f}%, 손익 {st['pnl']:+,.0f}원"
+            # 가장 빈번한 청산 사유
+            if st["reasons"]:
+                from collections import Counter
+                top_reason = Counter(st["reasons"]).most_common(1)[0]
+                strat_detail += f" (주요청산: {top_reason[0]}, {top_reason[1]}회)"
+
+        # 수수료 대비 수익 평가
+        if total_fee_est > 0:
+            fee_ratio = abs(period_pnl) / total_fee_est * 100
+            fee_verdict = "✅ 수수료 커버" if period_pnl > 0 else f"❌ 수수료 미달 ({fee_ratio:.0f}%)"
+        else:
+            fee_verdict = "거래 없음"
+
+        settlement_log = (
+            f"\n{'='*60}\n"
+            f"📊 정산 리포트 #{epoch} (경과 {elapsed_h:.1f}시간)\n"
+            f"{'='*60}\n"
+            f"  ■ 이번 구간: {period_count}건 (승 {period_wins} / 패 {period_losses} / 무 {period_even})\n"
+            f"  ■ 구간 승률: {period_win_rate:.0f}%\n"
+            f"  ■ 구간 손익: {period_pnl:+,.0f}원\n"
+            f"  ■ 추정 수수료: {total_fee_est:,.0f}원\n"
+            f"  ■ 수수료 평가: {fee_verdict}\n"
+            f"  ■ 전략별:{strat_detail}\n"
+            f"  ────────────────────────────\n"
+            f"  ■ 누적: {cumul_count}건, 손익 {cumul_pnl:+,.0f}원\n"
+            f"  ■ 현재가: {self.current_price:,.0f}원\n"
+            f"  ■ 추세: {self._market_trend}, RSI={self._rsi:.1f}, FGI={self._fgi}\n"
+            f"{'='*60}"
+        )
+        log.info(settlement_log)
+
+        # DB 기록 — scalp_settlements 테이블
+        db_insert("scalp_settlements", {
+            "epoch": epoch,
+            "elapsed_hours": round(elapsed_h, 2),
+            "period_trades": period_count,
+            "period_wins": period_wins,
+            "period_losses": period_losses,
+            "period_win_rate": round(period_win_rate, 2),
+            "period_pnl_krw": int(period_pnl),
+            "estimated_fee_krw": int(total_fee_est),
+            "fee_covered": period_pnl > 0,
+            "cumulative_trades": cumul_count,
+            "cumulative_pnl_krw": int(cumul_pnl),
+            "strategy_stats": json.dumps(
+                {s: {"count": st["count"], "wins": st["wins"], "pnl": int(st["pnl"])}
+                 for s, st in strategy_stats.items()},
+                ensure_ascii=False
+            ),
+            "market_trend": self._market_trend,
+            "rsi_value": round(self._rsi, 2),
+            "fgi_value": self._fgi,
+            "current_price": int(self.current_price),
+            "dry_run": self.dry_run,
+            "cycle_id": self.cycle_id,
+        })
+
+        # 훈련 일지 — scalp_training_journal 테이블
+        # 개선 포인트 자동 도출
+        improvements = []
+        if period_pnl < 0 and period_count > 0:
+            avg_loss = abs(period_pnl) / period_count
+            improvements.append(f"건당 평균 손실 {avg_loss:,.0f}원 — 진입 기준 강화 필요")
+        if period_win_rate < 40 and period_count >= 3:
+            improvements.append(f"승률 {period_win_rate:.0f}% 저조 — 시그널 신뢰도 임계값 상향 검토")
+        if total_fee_est > abs(gross_pnl) and period_count > 0:
+            improvements.append("총 수수료가 총 변동폭 초과 — 진입 빈도 축소 or 익절폭 확대 필요")
+        for s, st in strategy_stats.items():
+            s_wr = st["wins"] / max(st["count"], 1) * 100
+            if s_wr < 30 and st["count"] >= 3:
+                improvements.append(f"[{s}] 승률 {s_wr:.0f}% — 해당 전략 일시 비활성화 검토")
+
+        journal_entry = {
+            "epoch": epoch,
+            "elapsed_hours": round(elapsed_h, 2),
+            "period_summary": f"{period_count}건 {period_pnl:+,.0f}원 (승률 {period_win_rate:.0f}%)",
+            "cumulative_summary": f"{cumul_count}건 {cumul_pnl:+,.0f}원",
+            "fee_analysis": f"추정수수료 {total_fee_est:,.0f}원, {fee_verdict}",
+            "strategy_breakdown": json.dumps(strategy_stats, ensure_ascii=False, default=str),
+            "market_context": f"추세={self._market_trend}, RSI={self._rsi:.1f}, FGI={self._fgi}, 가격={self.current_price:,.0f}",
+            "improvement_notes": json.dumps(improvements, ensure_ascii=False),
+            "dry_run": self.dry_run,
+            "cycle_id": self.cycle_id,
+        }
+        db_insert("scalp_training_journal", journal_entry)
+
+        # 텔레그램 정산 알림
+        tg_msg = (
+            f"<b>[초단타 6h 정산 #{epoch}]</b>\n"
+            f"구간: {period_count}건 | 승률 {period_win_rate:.0f}%\n"
+            f"손익: {period_pnl:+,.0f}원 (수수료 {total_fee_est:,.0f}원)\n"
+            f"{fee_verdict}\n"
+            f"누적: {cumul_count}건 {cumul_pnl:+,.0f}원\n"
+        )
+        if improvements:
+            tg_msg += "\n<b>개선점:</b>\n" + "\n".join(f"• {imp}" for imp in improvements)
+        tg_msg += f"\n{'[DRY_RUN]' if self.dry_run else ''}"
+        send_telegram(tg_msg)
+
+        # 이전 정산 기준 업데이트
+        self._prev_settled_count = current_count
+        self._prev_settled_pnl = cumul_pnl
 
     async def strategy_alert_monitor(self):
         """10분마다 주요 지표를 확인하고 전략 변곡점에서 음성 알림"""
@@ -1591,6 +1802,7 @@ class ShortTermTrader:
             asyncio.create_task(self.strategy_loop()),
             asyncio.create_task(self.status_reporter()),
             asyncio.create_task(self.strategy_alert_monitor()),
+            asyncio.create_task(self.settlement_reporter()),
         ]
 
         # graceful shutdown (Windows에서는 add_signal_handler 미지원)

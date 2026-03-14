@@ -21,7 +21,8 @@ load_dotenv(PROJECT_DIR / ".env")
 
 KST = timezone(timedelta(hours=9))
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "") or os.getenv("SUPABASE_ANON_KEY", "")
+WORKER_TOKEN = os.getenv("WORKER_TOKEN", "")
 
 log = logging.getLogger("feature_eng")
 
@@ -68,6 +69,8 @@ class FeatureEngineer:
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
         }
+        if WORKER_TOKEN:
+            self.headers["x-worker-token"] = WORKER_TOKEN
 
     def fetch_snapshots(self, hours: int = 24) -> list[dict]:
         """최근 N시간의 시장 스냅샷 조회"""

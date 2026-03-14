@@ -490,26 +490,36 @@ class MLWorker:
         log.info(f"파라미터 스윕 실행: {params}")
         return {"status": "not_implemented", "message": "Phase 3에서 구현 예정"}
 
-    # ── 주간 결과 동기화 ──
+    # ── 결과 동기화 ──
 
-    def sync_results(self):
-        """로컬 백테스트/학습 결과를 DB에 주간 업로드 (변경분만)"""
+    def sync_results(self, force: bool = False):
+        """로컬 백테스트/학습 결과를 DB에 업로드 (변경분만)
+
+        Args:
+            force: True면 주간 타이머 무시하고 즉시 동기화
+        """
         now = time.time()
-        if now - self._last_result_sync < self._result_sync_interval:
+        if not force and now - self._last_result_sync < self._result_sync_interval:
             return
 
         self._last_result_sync = now
+        uploaded, total = self._do_sync()
+        if uploaded > 0:
+            log.info(f"📤 결과 동기화: {uploaded}/{total}건 업로드")
+
+    def _do_sync(self) -> tuple[int, int]:
+        """실제 동기화 로직. (업로드 건수, 전체 건수) 반환"""
         results_dir = PROJECT_DIR / "data" / "training_results"
         if not results_dir.exists():
-            return
+            return 0, 0
 
-        # 마지막 동기화 시각 파일
+        # 마지막 동기화 시각
         sync_marker = results_dir / ".last_sync"
         last_sync_time = 0
         if sync_marker.exists():
             last_sync_time = sync_marker.stat().st_mtime
 
-        # 마지막 동기화 이후 변경된 결과 파일만 수집
+        # 변경된 결과 파일만 수집
         new_files = []
         for f in results_dir.glob("*.json"):
             if f.name.startswith("."):
@@ -518,8 +528,7 @@ class MLWorker:
                 new_files.append(f)
 
         if not new_files:
-            log.debug("동기화할 새 결과 없음")
-            return
+            return 0, 0
 
         uploaded = 0
         for f in new_files:
@@ -544,9 +553,9 @@ class MLWorker:
                 log.warning(f"결과 업로드 실패 ({f.name}): {e}")
 
         if uploaded > 0:
-            log.info(f"📤 결과 동기화: {uploaded}/{len(new_files)}건 업로드")
-            # 동기화 시각 기록
             sync_marker.touch()
+
+        return uploaded, len(new_files)
 
     # ── 메인 루프 ──
 
@@ -617,11 +626,31 @@ def main():
                         help="워커 티어 (기본: collaborator)")
     parser.add_argument("--interval", type=int, default=30,
                         help="폴링 간격 (초, 기본: 30)")
+    parser.add_argument("--sync", action="store_true",
+                        help="결과를 즉시 동기화하고 종료 (수동 전송)")
     args = parser.parse_args()
 
     if not SUPABASE_URL or not SUPABASE_KEY:
         log.error("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 미설정")
         sys.exit(1)
+
+    if args.sync:
+        # 수동 동기화 모드: 즉시 업로드 후 종료
+        worker = MLWorker(
+            worker_id=args.worker_id,
+            tier=args.tier,
+            worker_name=args.worker_name,
+        )
+        worker.register()
+        if not worker.running:
+            sys.exit(1)
+        uploaded, total = worker._do_sync()
+        if total == 0:
+            log.info("동기화할 새 결과 없음")
+        else:
+            log.info(f"📤 수동 동기화 완료: {uploaded}/{total}건 업로드")
+        worker.go_offline()
+        return
 
     if args.tier == "viewer":
         log.error("viewer 티어는 작업 실행 불가 — 대시보드만 사용하세요")

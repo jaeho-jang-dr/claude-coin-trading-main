@@ -431,13 +431,19 @@ class BitcoinTradingEnvV2(gym.Env):
         new_value = self._portfolio_value(new_price)
         self.total_value_history.append(new_value)
 
-        # ── 보상 계산 (V2 강화) ──
+        # ── 보상 계산 (V2.3 — 방향성 보상 포함) ──
+        price_change = (new_price - price) / price if price > 0 else 0
+        btc_value = self.btc_balance * new_price
+        btc_ratio = btc_value / new_value if new_value > 0 else 0
+
         reward_info = self.reward_calc.calculate(
             prev_portfolio_value=prev_value,
             curr_portfolio_value=new_value,
             action=action_val,
             prev_action=self.prev_action,
             step=self.current_step - self.start_idx,
+            btc_ratio=btc_ratio,
+            price_change=price_change,
         )
         reward = reward_info["reward"] if isinstance(reward_info, dict) else float(reward_info)
 
@@ -448,13 +454,11 @@ class BitcoinTradingEnvV2(gym.Env):
                 penalty = min(0.2, 0.03 * (self.steps_no_trade - 10))
                 reward -= penalty
 
-            # 거래 보너스: 수익성 기반 (무조건 → 조건부)
+            # 거래 보너스: 순수 수익성 기반 (손실 거래는 보상 없음)
             if traded:
                 step_return = (new_value - prev_value) / prev_value
                 if step_return > 0:
-                    reward += 0.2   # 수익 거래: 강한 보상
-                else:
-                    reward += 0.02  # 손실 거래: 미약한 보상 (붕괴 방지)
+                    reward += 0.15  # 수익 거래만 보상
 
             # 에피소드 초반 거래 0이면 약한 페널티
             ep_progress = (self.current_step - self.start_idx)
@@ -462,9 +466,7 @@ class BitcoinTradingEnvV2(gym.Env):
                 reward -= 0.1
 
         # [개선 2] 폭락 대응 보상
-        price_change = (new_price - price) / price
         if price_change < -0.03:  # 3% 이상 급락
-            # 현금 비중이 높으면 보상 (위기 회피)
             cash_ratio = self.krw_balance / new_value if new_value > 0 else 0
             if cash_ratio > 0.5:
                 reward += 0.15  # 폭락에서 현금 보유 = 좋은 판단

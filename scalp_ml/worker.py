@@ -274,6 +274,8 @@ class MLWorker:
         self.allowed_tasks = TIER_PERMISSIONS.get(tier, set())
         self.current_task_id = None
         self._last_heartbeat = 0
+        self._last_result_sync = 0  # 주간 결과 업로드 타이머
+        self._result_sync_interval = 7 * 24 * 3600  # 7일 (초)
 
     def register(self):
         """워커를 DB에 등록 (티어 권한 검증 포함)
@@ -322,43 +324,25 @@ class MLWorker:
                 log.warning("워커 상태 업데이트 실패 — 계속 실행")
 
         else:
-            # 신규 워커: owner/coworker 자동 등록 차단
-            if self.tier in ("owner", "coworker"):
-                log.error(
-                    f"❌ 신규 워커는 '{self.tier}' 티어로 등록할 수 없습니다"
-                )
-                log.error(
-                    f"   관리자가 먼저 DB에 워커를 등록해야 합니다:"
-                )
-                log.error(
-                    f"   python scripts/supabase_query.py --sql \""
-                    f"INSERT INTO compute_workers (worker_id, tier, status) "
-                    f"VALUES ('{self.worker_id}', '{self.tier}', 'offline')\""
-                )
-                self.running = False
-                return
-
-            # collaborator만 자동 등록 허용
-            worker_data = {
-                "worker_id": self.worker_id,
-                "worker_name": self.worker_name or self.worker_id,
-                "tier": "collaborator",
-                "status": "online",
-                "is_main_brain": False,
-                "last_heartbeat": datetime.now(KST).isoformat(),
-                "last_online_at": datetime.now(KST).isoformat(),
-                "allowed_task_types": list(TIER_PERMISSIONS["collaborator"]),
-                **sys_info,
-            }
-
-            self.tier = "collaborator"
-            self.allowed_tasks = TIER_PERMISSIONS["collaborator"]
-
-            if self.db.upsert("compute_workers", worker_data):
-                log.info(f"워커 신규 등록: {self.worker_id} (tier: collaborator)")
-                log.info(f"   상위 티어가 필요하면 관리자에게 요청하세요")
-            else:
-                log.warning("워커 등록 실패 — 계속 실행")
+            # 미등록 워커: 모든 티어 자동 등록 차단
+            # 등록 절차: 관리자 초대 이메일 → 동의 → 승인 → DB 등록
+            log.error(
+                f"❌ 미등록 워커입니다: '{self.worker_id}'"
+            )
+            log.error(
+                f"   등록 절차:"
+            )
+            log.error(
+                f"   1. 관리자에게 참여 요청 이메일 전송"
+            )
+            log.error(
+                f"   2. 관리자 승인 후 워커 ID와 .env 파일을 이메일로 수령"
+            )
+            log.error(
+                f"   3. 수령한 워커 ID로 재실행"
+            )
+            self.running = False
+            return
 
     def heartbeat(self):
         """하트비트 전송 (60초 간격)"""
@@ -506,6 +490,64 @@ class MLWorker:
         log.info(f"파라미터 스윕 실행: {params}")
         return {"status": "not_implemented", "message": "Phase 3에서 구현 예정"}
 
+    # ── 주간 결과 동기화 ──
+
+    def sync_results(self):
+        """로컬 백테스트/학습 결과를 DB에 주간 업로드 (변경분만)"""
+        now = time.time()
+        if now - self._last_result_sync < self._result_sync_interval:
+            return
+
+        self._last_result_sync = now
+        results_dir = PROJECT_DIR / "data" / "training_results"
+        if not results_dir.exists():
+            return
+
+        # 마지막 동기화 시각 파일
+        sync_marker = results_dir / ".last_sync"
+        last_sync_time = 0
+        if sync_marker.exists():
+            last_sync_time = sync_marker.stat().st_mtime
+
+        # 마지막 동기화 이후 변경된 결과 파일만 수집
+        new_files = []
+        for f in results_dir.glob("*.json"):
+            if f.name.startswith("."):
+                continue
+            if f.stat().st_mtime > last_sync_time:
+                new_files.append(f)
+
+        if not new_files:
+            log.debug("동기화할 새 결과 없음")
+            return
+
+        uploaded = 0
+        for f in new_files:
+            try:
+                with open(f) as fp:
+                    result_data = json.load(fp)
+
+                record = {
+                    "worker_id": self.worker_id,
+                    "task_type": result_data.get("task_type", "unknown"),
+                    "status": "completed",
+                    "result": json.dumps(result_data, default=str),
+                    "completed_at": datetime.fromtimestamp(
+                        f.stat().st_mtime, tz=KST
+                    ).isoformat(),
+                    "params": json.dumps(result_data.get("params", {})),
+                }
+
+                if self.db.insert("scalp_training_tasks", record):
+                    uploaded += 1
+            except Exception as e:
+                log.warning(f"결과 업로드 실패 ({f.name}): {e}")
+
+        if uploaded > 0:
+            log.info(f"📤 결과 동기화: {uploaded}/{len(new_files)}건 업로드")
+            # 동기화 시각 기록
+            sync_marker.touch()
+
     # ── 메인 루프 ──
 
     def run(self):
@@ -539,6 +581,9 @@ class MLWorker:
             try:
                 # 하트비트
                 self.heartbeat()
+
+                # 주간 결과 동기화
+                self.sync_results()
 
                 task = self.claim_task()
                 if task:

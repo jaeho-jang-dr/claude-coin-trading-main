@@ -43,23 +43,8 @@ CREATE TABLE IF NOT EXISTS compute_workers (
   notes TEXT
 );
 
--- 주 컴은 1대만 (트리거)
-CREATE OR REPLACE FUNCTION enforce_single_main_brain()
-RETURNS TRIGGER AS $$
-BEGIN
-  IF NEW.is_main_brain = TRUE THEN
-    UPDATE compute_workers
-    SET is_main_brain = FALSE
-    WHERE id != NEW.id AND is_main_brain = TRUE;
-  END IF;
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS trg_single_main_brain ON compute_workers;
-CREATE TRIGGER trg_single_main_brain
-  BEFORE INSERT OR UPDATE ON compute_workers
-  FOR EACH ROW EXECUTE FUNCTION enforce_single_main_brain();
+-- owner 티어는 모두 main_brain 가능 (여러 대 동시 운영)
+-- 라이브 봇 중복 실행 방지는 봇 코드의 락(trading.lock)으로 처리
 
 CREATE INDEX IF NOT EXISTS idx_workers_status ON compute_workers(status);
 CREATE INDEX IF NOT EXISTS idx_workers_tier ON compute_workers(tier);

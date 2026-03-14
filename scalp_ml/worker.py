@@ -276,25 +276,89 @@ class MLWorker:
         self._last_heartbeat = 0
 
     def register(self):
-        """워커를 DB에 등록 (이미 있으면 업데이트)"""
+        """워커를 DB에 등록 (티어 권한 검증 포함)
+
+        보안 규칙:
+        - DB에 이미 등록된 워커: DB의 tier를 강제 적용 (CLI --tier 무시)
+        - 신규 워커: collaborator로만 자동 등록 가능
+        - owner/coworker 승격: 관리자가 DB에서 직접 변경해야 함
+        """
         sys_info = get_system_info()
 
-        worker_data = {
-            "worker_id": self.worker_id,
-            "worker_name": self.worker_name or self.worker_id,
-            "tier": self.tier,
-            "status": "online",
-            "is_main_brain": self.tier == "owner",
-            "last_heartbeat": datetime.now(KST).isoformat(),
-            "last_online_at": datetime.now(KST).isoformat(),
-            "allowed_task_types": list(self.allowed_tasks),
-            **sys_info,
-        }
+        # 1) DB에 이미 등록된 워커인지 확인
+        existing = self.db.get("compute_workers", {
+            "select": "worker_id,tier,is_main_brain,status",
+            "worker_id": f"eq.{self.worker_id}",
+        })
 
-        if self.db.upsert("compute_workers", worker_data):
-            log.info(f"워커 등록 완료: {self.worker_id} (tier: {self.tier})")
+        if existing:
+            # DB에 등록된 티어를 강제 적용
+            db_tier = existing[0]["tier"]
+            if db_tier != self.tier:
+                log.warning(
+                    f"⚠️  CLI 티어({self.tier})와 DB 티어({db_tier}) 불일치 "
+                    f"— DB 티어({db_tier})를 적용합니다"
+                )
+                log.warning(
+                    f"   티어 변경은 관리자가 DB에서 직접 수행해야 합니다"
+                )
+                self.tier = db_tier
+                self.allowed_tasks = TIER_PERMISSIONS.get(db_tier, set())
+
+            # 기존 워커 상태 업데이트 (tier는 변경하지 않음)
+            update_data = {
+                "status": "online",
+                "last_heartbeat": datetime.now(KST).isoformat(),
+                "last_online_at": datetime.now(KST).isoformat(),
+                "allowed_task_types": list(self.allowed_tasks),
+                **sys_info,
+            }
+            if self.worker_name:
+                update_data["worker_name"] = self.worker_name
+
+            if self.db.patch("compute_workers", {"worker_id": self.worker_id}, update_data):
+                log.info(f"워커 재접속: {self.worker_id} (tier: {self.tier})")
+            else:
+                log.warning("워커 상태 업데이트 실패 — 계속 실행")
+
         else:
-            log.warning("워커 등록 실패 — 계속 실행")
+            # 신규 워커: owner/coworker 자동 등록 차단
+            if self.tier in ("owner", "coworker"):
+                log.error(
+                    f"❌ 신규 워커는 '{self.tier}' 티어로 등록할 수 없습니다"
+                )
+                log.error(
+                    f"   관리자가 먼저 DB에 워커를 등록해야 합니다:"
+                )
+                log.error(
+                    f"   python scripts/supabase_query.py --sql \""
+                    f"INSERT INTO compute_workers (worker_id, tier, status) "
+                    f"VALUES ('{self.worker_id}', '{self.tier}', 'offline')\""
+                )
+                self.running = False
+                return
+
+            # collaborator만 자동 등록 허용
+            worker_data = {
+                "worker_id": self.worker_id,
+                "worker_name": self.worker_name or self.worker_id,
+                "tier": "collaborator",
+                "status": "online",
+                "is_main_brain": False,
+                "last_heartbeat": datetime.now(KST).isoformat(),
+                "last_online_at": datetime.now(KST).isoformat(),
+                "allowed_task_types": list(TIER_PERMISSIONS["collaborator"]),
+                **sys_info,
+            }
+
+            self.tier = "collaborator"
+            self.allowed_tasks = TIER_PERMISSIONS["collaborator"]
+
+            if self.db.upsert("compute_workers", worker_data):
+                log.info(f"워커 신규 등록: {self.worker_id} (tier: collaborator)")
+                log.info(f"   상위 티어가 필요하면 관리자에게 요청하세요")
+            else:
+                log.warning("워커 등록 실패 — 계속 실행")
 
     def heartbeat(self):
         """하트비트 전송 (60초 간격)"""

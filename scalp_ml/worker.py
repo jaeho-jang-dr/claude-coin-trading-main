@@ -274,8 +274,6 @@ class MLWorker:
         self.allowed_tasks = TIER_PERMISSIONS.get(tier, set())
         self.current_task_id = None
         self._last_heartbeat = 0
-        self._last_result_sync = 0  # 주간 결과 업로드 타이머
-        self._result_sync_interval = 7 * 24 * 3600  # 7일 (초)
 
     def register(self):
         """워커를 DB에 등록 (티어 권한 검증 포함)
@@ -490,22 +488,7 @@ class MLWorker:
         log.info(f"파라미터 스윕 실행: {params}")
         return {"status": "not_implemented", "message": "Phase 3에서 구현 예정"}
 
-    # ── 결과 동기화 ──
-
-    def sync_results(self, force: bool = False):
-        """로컬 백테스트/학습 결과를 DB에 업로드 (변경분만)
-
-        Args:
-            force: True면 주간 타이머 무시하고 즉시 동기화
-        """
-        now = time.time()
-        if not force and now - self._last_result_sync < self._result_sync_interval:
-            return
-
-        self._last_result_sync = now
-        uploaded, total = self._do_sync()
-        if uploaded > 0:
-            log.info(f"📤 결과 동기화: {uploaded}/{total}건 업로드")
+    # ── 결과 동기화 (수동 전용) ──
 
     def _do_sync(self) -> tuple[int, int]:
         """실제 동기화 로직. (업로드 건수, 전체 건수) 반환"""
@@ -590,9 +573,6 @@ class MLWorker:
             try:
                 # 하트비트
                 self.heartbeat()
-
-                # 주간 결과 동기화
-                self.sync_results()
 
                 task = self.claim_task()
                 if task:

@@ -1,7 +1,15 @@
 # === 환경별 설정 (머신마다 다름) ===
 .env
+.env.*
+!.env.example
+.supabase_token
 .venv/
 venv/
+
+# === 셋업 가이드 (민감 정보 포함, 이메일로 전달) ===
+docs/setup-owner.md
+docs/setup-coworker.md
+docs/setup-collaborator.md
 
 # === 런타임 데이터 (머신마다 다름) ===
 data/charts/*.png

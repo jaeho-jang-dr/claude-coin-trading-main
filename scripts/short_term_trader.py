@@ -59,44 +59,48 @@ MARKET = "KRW-BTC"
 UPBIT_API = "https://api.upbit.com/v1"
 UPBIT_WS = "wss://api.upbit.com/websocket/v1"
 
-# ── 단타 전용 파라미터 (공격적 모드) ──────────────────────
+# ── 단타 전용 파라미터 (v5 보수적 강화) ──────────────────────
+# 핵심 변경: R:R 비율 역전 (기존 TP0.5/SL1.2=0.42 → TP0.8/SL0.7=1.14)
+# 기존은 승률 71%+ 필요 → v5는 승률 47%만 넘으면 수익
 
-SHORT_TERM_BUDGET = int(os.getenv("SHORT_TERM_BUDGET", "1000000"))  # 단타 전용 자금 100만원 (공격: 50만→100만)
-SHORT_TERM_MAX_TRADE = int(os.getenv("SHORT_TERM_MAX_TRADE", "300000"))  # 1회 최대 30만원 (공격: 20만→30만)
-SHORT_TERM_MAX_DAILY = int(os.getenv("SHORT_TERM_MAX_DAILY", "20"))  # 일일 최대 20회 (공격: 10→20)
-SHORT_TERM_STOP_LOSS = float(os.getenv("SHORT_TERM_STOP_LOSS", "1.2"))  # 손절 1.2% (공격: 0.8→1.2, 여유 확대)
-SHORT_TERM_TAKE_PROFIT = float(os.getenv("SHORT_TERM_TAKE_PROFIT", "0.5"))  # 익절 0.5% (공격: 0.8→0.5, 빈번한 소폭 익절)
-SHORT_TERM_MAX_HOLD_MIN = int(os.getenv("SHORT_TERM_MAX_HOLD_MIN", "15"))  # 최대 보유 15분 (공격: 20→15, 빠른 회전)
+SHORT_TERM_BUDGET = int(os.getenv("SHORT_TERM_BUDGET", "1000000"))  # 단타 전용 자금 100만원
+SHORT_TERM_MAX_TRADE = int(os.getenv("SHORT_TERM_MAX_TRADE", "200000"))  # 1회 최대 20만원 (v5: 30만→20만)
+SHORT_TERM_MAX_DAILY = int(os.getenv("SHORT_TERM_MAX_DAILY", "10"))  # 일일 최대 10회 (v5: 20→10, 질 위주)
+SHORT_TERM_STOP_LOSS = float(os.getenv("SHORT_TERM_STOP_LOSS", "0.7"))  # 손절 0.7% (v5: 1.2→0.7, 빠른 손절)
+SHORT_TERM_TAKE_PROFIT = float(os.getenv("SHORT_TERM_TAKE_PROFIT", "0.8"))  # 익절 0.8% (v5: 0.5→0.8, R:R 1.14)
+SHORT_TERM_MAX_HOLD_MIN = int(os.getenv("SHORT_TERM_MAX_HOLD_MIN", "10"))  # 최대 보유 10분 (v5: 15→10)
 COMMISSION_PCT = 0.05  # Upbit 수수료 0.05%
-MIN_PROFIT_AFTER_FEE = COMMISSION_PCT * 2 + 0.05  # 수수료 왕복 + 최소 마진 0.05% = 0.15% (공격: 0.2→0.15)
+MIN_PROFIT_AFTER_FEE = COMMISSION_PCT * 2 + 0.1  # 수수료 왕복 + 최소 마진 0.1% = 0.2% (v5: 0.15→0.2)
 
 # 뉴스 스캔 간격
-NEWS_SCAN_INTERVAL = 120  # 2분 (공격: 3분→2분, 더 빈번한 스캔)
+NEWS_SCAN_INTERVAL = 180  # 3분 (v5: 2분→3분, 노이즈 감소)
 
 # 급등/급락 감지 기준
-SPIKE_THRESHOLD_PCT = 0.5  # 최근 N분 내 0.5% 변동 (공격: 0.8→0.5, 작은 변동에도 진입)
+SPIKE_THRESHOLD_PCT = 0.8  # 최근 N분 내 0.8% 변동 (v5: 0.5→0.8, 확실한 변동만)
 SPIKE_WINDOW_SEC = 300  # 5분 윈도우
 
 # 고래 감지 기준
-WHALE_THRESHOLD_KRW = 20_000_000  # 2000만원 이상 (공격: 3000만→2000만, 작은 고래도 추종)
-WHALE_RATIO_THRESHOLD = 0.6  # 금액 비율 60% 이상 (공격: 70→60, 진입 완화)
+WHALE_THRESHOLD_KRW = 50_000_000  # 5000만원 이상 (v5: 2000만→5000만, 진짜 고래만)
+WHALE_RATIO_THRESHOLD = 0.7  # 금액 비율 70% 이상 (v5: 60→70, 확실한 편향만)
 WHALE_RATIO_WINDOW_SEC = 180  # 비율 판정 윈도우 3분
 
 # 매도 압력 방패
-SELL_PRESSURE_BLOCK_RATIO = 4.0  # 매도가 매수의 4배 이상이면 매수 차단 (공격: 3→4, 완화)
+SELL_PRESSURE_BLOCK_RATIO = 3.0  # 매도가 매수의 3배 이상이면 매수 차단 (v5: 4→3, 강화)
 
-# ── v4 안전 필터 (공격적 완화) ─────────────────────────
+# ── v5 안전 필터 (보수적 강화) ─────────────────────────
 # 1. 하락 추세에서 whale 매수 차단
 TREND_SMA_CANDLE_COUNT = 20  # SMA20 계산용 일봉 수
 # 2. 뉴스 negative일 때 매수 차단 임계값
-NEWS_BLOCK_THRESHOLD = -0.5  # 감성 점수 이하면 매수 금지 (공격: -0.3→-0.5, 완화)
+NEWS_BLOCK_THRESHOLD = -0.3  # 감성 점수 이하면 매수 금지 (v5: -0.5→-0.3, 강화)
 # 3. 극공포 시 매수 차단
-FGI_BLOCK_THRESHOLD = 5  # FGI 5 미만이면 매수 금지 (공격: 10→5, 완화)
+FGI_BLOCK_THRESHOLD = 15  # FGI 15 미만이면 매수 금지 (v5: 5→15, 강화)
 # 4. 타임아웃 전 조기 손절
-EARLY_STOP_LOSS_PCT = 0.3  # 보유 시간 10분 경과 + -0.3% 이하면 조기 청산 (공격: 0.2→0.3)
-EARLY_STOP_TIME_MIN = 10  # 조기 손절 판단 시작 시간 (공격: 15→10, 더 빠르게 판단)
-# 5. 중복 진입 방지: 같은 전략으로 동시 2포지션 허용
-MAX_SAME_STRATEGY_POSITIONS = 2  # (공격: 1→2, 동시 진입 허용)
+EARLY_STOP_LOSS_PCT = 0.2  # 보유 시간 7분 경과 + -0.2% 이하면 조기 청산 (v5: 0.3→0.2)
+EARLY_STOP_TIME_MIN = 7  # 조기 손절 판단 시작 시간 (v5: 10→7, 더 빨리)
+# 5. 중복 진입 방지: 같은 전략 동시 1포지션만
+MAX_SAME_STRATEGY_POSITIONS = 1  # (v5: 2→1, 중복 진입 차단)
+# 6. 최소 진입 confidence (v5 신규)
+MIN_ENTRY_CONFIDENCE = 0.65  # 65% 이상만 진입 (v5 신규, 기존 0.5)
 
 # ── 로깅 설정 ──────────────────────────────────────────
 
@@ -425,8 +429,16 @@ class ShortTermTrader:
             return False, f"{signal.strategy} 중복 진입 차단 (이미 {same_strategy_count}건)"
 
         # 필터 5: 하락 추세 + RSI 과매도 접근 시 전체 매수 차단
-        if self._market_trend == "downtrend" and self._rsi < 35:
+        if self._market_trend == "downtrend" and self._rsi < 40:
             return False, f"하락추세 + RSI {self._rsi:.0f} 과매도 접근 -- 매수 차단"
+
+        # 필터 6 (v5): 하락추세에서 모든 매수 시그널 차단 (whale 외에도)
+        if self._market_trend == "downtrend" and signal.action == "buy":
+            return False, f"하락추세 전체 매수 차단 (trend={self._market_trend})"
+
+        # 필터 7 (v5): RSI 과매수 구간 매수 차단
+        if self._rsi > 70 and signal.action == "buy":
+            return False, f"RSI {self._rsi:.0f} 과매수 -- 매수 차단"
 
         return True, "OK"
 
@@ -1322,7 +1334,7 @@ class ShortTermTrader:
                             block_filter="sell_pressure", block_reason="매도 압력 방패 발동")
                     else:
                         best_buy = max(buy_signals, key=lambda s: s.confidence)
-                        if best_buy.confidence >= 0.5:  # 최소 신뢰도 50%
+                        if best_buy.confidence >= MIN_ENTRY_CONFIDENCE:  # v5: 65%
                             self.execute_entry(best_buy)
 
                 await asyncio.sleep(1)

@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """
-텔레그램 수신 데몬 — 백그라운드 상시 실행
-봇으로 들어오는 메시지를 DB에 저장하고, 등록된 사용자 간 메시지 중계
+텔레그램 통합 멀티챗 터미널
+한 화면에서 모든 사람과 동시 대화. 봇 수신 + 키보드 입력 송신.
 
-봇 명령어:
-  /start              — 봇 소개 + chat_id 표시
-  /chat_id            — 내 chat_id 확인
-  /list               — 연락처 목록
-  /msg 이름 메시지     — 특정 사용자에게 메시지 전송
+입력 방식:
+  이름>메시지          — 특정 사용자에게 전송 (대화 상대 자동 기억)
+  이름: 메시지         — 위와 동일
+  /to 이름             — 기본 대화 상대 설정 (이후 이름 없이 입력 가능)
+  /to                  — 기본 대화 상대 해제
+  /list                — 연락처 목록
   /all 메시지          — 전체 공지
+  그냥 텍스트          — 기본 대화 상대에게 전송
+
+봇 명령어 (텔레그램에서):
+  /start /list /msg /all /chat_id
 
 실행: python scripts/telegram_listener.py
-중지: Ctrl+C 또는 taskkill
+중지: Ctrl+C
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ if sys.stdout and hasattr(sys.stdout, 'buffer'):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
 
+import threading
 import requests
 from dotenv import load_dotenv
 
@@ -48,7 +54,8 @@ HEADERS = {
 POLL_INTERVAL = 3
 CLEANUP_INTERVAL = 3600
 _last_cleanup = 0
-_active_chats: dict[str, "subprocess.Popen"] = {}  # chat_id → 터미널 프로세스
+_default_target: dict | None = None  # /to 로 설정한 기본 대화 상대
+_running = True  # 메인 루프 제어
 
 
 # ── 연락처 조회 ──────────────────────────────────
@@ -244,7 +251,7 @@ def handle_command(chat_id: str, text: str, sender: dict | None):
     return False
 
 
-# ── 일반 메시지 처리 (명령어가 아닌 경우) ──────────
+# ── 일반 메시지 처리 (텔레그램에서 온 메시지) ──────────
 
 def handle_plain_message(chat_id: str, text: str, sender: dict | None):
     """일반 메시지 — 이름>메시지 형식이면 전달, 아니면 그냥 기록"""
@@ -274,49 +281,116 @@ def handle_plain_message(chat_id: str, text: str, sender: dict | None):
                                      worker_name=sender["name"])
                     return
 
-    # 매칭 안 되면 기록만 (관리자가 inbox에서 확인)
+    # 매칭 안 되면 기록만
 
 
-# ── 채팅 터미널 자동 실행 ──────────────────────
+# ── 키보드 입력 처리 (터미널에서 직접 타이핑) ──────────
 
-def open_chat_terminal(chat_id: str, name: str, contact: dict):
-    """등록된 사용자가 메시지를 보내면 전용 채팅 터미널을 자동 실행"""
-    # 이미 열린 터미널이 살아있는지 확인
-    if chat_id in _active_chats:
-        proc = _active_chats[chat_id]
-        if proc.poll() is None:
-            return  # 아직 실행 중
-        del _active_chats[chat_id]
+def handle_local_input(text: str):
+    """터미널 키보드 입력 처리 — 멀티챗 송신"""
+    global _default_target
+    text = text.strip()
+    if not text:
+        return
 
-    worker_id = contact.get("worker_id") or name
-    title = f"Chat - {name} [{contact.get('role', '?')}]"
-
-    try:
-        if sys.platform == "win32":
-            # Windows: 새 cmd 창으로 chat 실행
-            cmd = (
-                f'start "{title}" cmd /k '
-                f'"cd /d {PROJECT_DIR} && python scripts/worker_admin.py chat '
-                f'--chat-id {chat_id}"'
-            )
-            proc = _sp.Popen(cmd, shell=True, cwd=str(PROJECT_DIR))
+    # /to 이름 — 기본 대화 상대 설정
+    if text.lower().startswith("/to"):
+        name = text[3:].strip()
+        if not name:
+            _default_target = None
+            print("  기본 대화 상대 해제됨. 이름>메시지 형식으로 보내세요.", flush=True)
+            return
+        target = lookup_by_name(name)
+        if target:
+            _default_target = target
+            print(f"  기본 대화 상대: {target['name']} [{target.get('role','')}]", flush=True)
+            print(f"  이제 메시지만 입력하면 {target['name']}에게 전송됩니다.", flush=True)
         else:
-            # Linux/Mac: 새 터미널
-            proc = _sp.Popen(
-                [sys.executable, "scripts/worker_admin.py", "chat",
-                 "--chat-id", chat_id],
-                cwd=str(PROJECT_DIR),
-            )
+            print(f"  '{name}' 을(를) 찾을 수 없습니다. /list 로 확인하세요.", flush=True)
+        return
 
-        _active_chats[chat_id] = proc
-        print(f"  💬 채팅 터미널 열림: {name} (chat_id={chat_id})", flush=True)
-    except Exception as e:
-        print(f"  채팅 터미널 실행 실패: {e}", flush=True)
+    # /list — 연락처 목록
+    if text.lower() == "/list":
+        contacts = get_all_contacts()
+        if not contacts:
+            print("  등록된 연락처가 없습니다.", flush=True)
+            return
+        print("  [연락처 목록]", flush=True)
+        for c in contacts:
+            aliases = c.get("aliases") or []
+            alias_str = f" ({', '.join(aliases)})" if aliases else ""
+            marker = " ← 현재 대화상대" if _default_target and c["chat_id"] == _default_target["chat_id"] else ""
+            print(f"    {c['name']}{alias_str} [{c['role']}]{marker}", flush=True)
+        return
+
+    # /all 메시지 — 전체 공지
+    if text.lower().startswith("/all "):
+        msg_text = text[5:].strip()
+        if not msg_text:
+            return
+        contacts = get_all_contacts()
+        sent = 0
+        for c in contacts:
+            send_telegram(c["chat_id"], f"[공지] {msg_text}")
+            save_message(chat_id=c["chat_id"], direction="incoming",
+                         message=f"[공지] {msg_text}", worker_name="system")
+            sent += 1
+        print(f"  전체 공지 발송: {sent}명", flush=True)
+        return
+
+    # 이름>메시지 또는 이름: 메시지
+    target = None
+    msg_text = text
+    for sep in [">", ":"]:
+        if sep in text:
+            name_part, body = text.split(sep, 1)
+            name_part = name_part.strip()
+            body = body.strip()
+            if name_part and body:
+                found = lookup_by_name(name_part)
+                if found:
+                    target = found
+                    msg_text = body
+                    _default_target = target  # 자동으로 기본 대화 상대 갱신
+                    break
+
+    # 이름 지정 없으면 기본 대화 상대 사용
+    if not target:
+        if _default_target:
+            target = _default_target
+            msg_text = text
+        else:
+            print("  대화 상대를 지정하세요: 이름>메시지  또는  /to 이름", flush=True)
+            return
+
+    # 전송
+    ok = send_telegram(target["chat_id"], msg_text)
+    if ok:
+        ts = datetime.now(KST).strftime("%H:%M:%S")
+        print(f"[{ts}] → {target['name']}: {msg_text}", flush=True)
+        save_message(chat_id=target["chat_id"], direction="outgoing",
+                     message=msg_text, worker_name="owner")
+    else:
+        print(f"  전송 실패: {target['name']}", flush=True)
+
+
+def input_loop():
+    """키보드 입력 스레드 — 터미널에서 메시지 입력"""
+    global _running
+    while _running:
+        try:
+            line = input()
+            handle_local_input(line)
+        except EOFError:
+            break
+        except KeyboardInterrupt:
+            _running = False
+            break
+        except Exception as e:
+            print(f"  입력 오류: {e}", flush=True)
 
 
 # ── 메인 루프 ──────────────────────────────────
-
-import subprocess as _sp
 
 LOCK_FILE = PROJECT_DIR / "data" / "telegram_listener.lock"
 
@@ -326,10 +400,9 @@ def acquire_lock():
     if LOCK_FILE.exists():
         try:
             old_pid = int(LOCK_FILE.read_text().strip())
-            # 프로세스가 살아있는지 확인
-            import subprocess
-            r = subprocess.run(["tasklist", "/FI", f"PID eq {old_pid}"],
-                               capture_output=True, text=True, timeout=5)
+            import subprocess as _sp
+            r = _sp.run(["tasklist", "/FI", f"PID eq {old_pid}"],
+                        capture_output=True, text=True, timeout=5)
             if str(old_pid) in r.stdout:
                 print(f"이미 실행 중 (PID {old_pid}). 종료합니다.")
                 sys.exit(0)
@@ -348,24 +421,36 @@ def release_lock():
 
 
 def main():
+    global _running
+
     if not TG_TOKEN:
         print("TELEGRAM_BOT_TOKEN 미설정")
         sys.exit(1)
 
     acquire_lock()
 
-    print(f"[{datetime.now(KST).strftime('%H:%M:%S')}] 텔레그램 수신 데몬 시작 (PID {os.getpid()}, 폴링 {POLL_INTERVAL}초)")
-    print(f"  봇 명령어: /start /list /msg /all /chat_id")
-    print(f"  단축 전송: 이름>메시지  또는  이름: 메시지")
-    print("-" * 50)
+    print("=" * 55)
+    print("  텔레그램 통합 멀티챗 터미널")
+    print("=" * 55)
+    print(f"  PID {os.getpid()} | 폴링 {POLL_INTERVAL}초")
+    print()
+    print("  사용법:")
+    print("    이름>메시지       특정 사용자에게 전송")
+    print("    이름: 메시지      위와 동일")
+    print("    /to 이름          기본 대화 상대 설정")
+    print("    /to               기본 상대 해제")
+    print("    /list             연락처 목록")
+    print("    /all 메시지       전체 공지")
+    print("    Ctrl+C            종료")
+    print("-" * 55, flush=True)
 
-    # 연결 알림: 등록된 모든 연락처에게 온라인 알림
+    # 연결 알림
     try:
         contacts = get_all_contacts()
         ts = datetime.now(KST).strftime("%H:%M")
         for c in contacts:
             send_telegram(c["chat_id"],
-                f"🟢 CoinTrading 봇 온라인 ({ts} KST)\n"
+                f"CoinTrading 봇 온라인 ({ts} KST)\n"
                 f"명령어: /list /msg /all /chat_id")
         print(f"  연결 알림 발송: {len(contacts)}명", flush=True)
     except Exception:
@@ -381,7 +466,6 @@ def main():
         )
         if r.ok and r.json().get("result"):
             offset = r.json()["result"][-1]["update_id"] + 1
-            print(f"  기존 메시지 건너뜀 (offset={offset})")
     except Exception:
         pass
 
@@ -393,17 +477,21 @@ def main():
             return
         _last_cleanup = now
         cutoff = (datetime.now(KST) - timedelta(days=7)).isoformat()
-        resp = requests.delete(
+        requests.delete(
             f"{SUPABASE_URL}/rest/v1/telegram_messages",
             params={"created_at": f"lt.{cutoff}"},
             headers={**HEADERS, "Prefer": "return=minimal"},
             timeout=15,
         )
-        if resp.status_code < 300:
-            print(f"[{datetime.now(KST).strftime('%H:%M:%S')}] 7일 이전 메시지 정리 완료", flush=True)
+
+    # 키보드 입력 스레드 시작
+    input_thread = threading.Thread(target=input_loop, daemon=True)
+    input_thread.start()
+
+    print(f"[{datetime.now(KST).strftime('%H:%M:%S')}] 대기 중... (메시지를 입력하세요)\n", flush=True)
 
     try:
-        while True:
+        while _running:
             cleanup_old_messages()
             try:
                 resp = requests.get(
@@ -428,35 +516,39 @@ def main():
                     tg_first = msg["chat"].get("first_name", "")
                     tg_msg_id = msg.get("message_id")
 
-                    # 연락처 매핑
+                    # 등록된 연락처인지 확인
                     contact = lookup_by_chat_id(chat_id)
 
-                    # DB 기록 (모든 메시지)
+                    # 미등록 사용자 → 안내만 하고 무시
+                    if not contact:
+                        ts = datetime.now(KST).strftime("%H:%M:%S")
+                        print(f"[{ts}] [미등록 chat_id={chat_id}] {tg_first}: {text}", flush=True)
+                        send_telegram(chat_id,
+                            f"등록되지 않은 사용자입니다.\n"
+                            f"관리자에게 chat_id를 알려주세요: {chat_id}")
+                        continue
+
+                    # DB 기록
                     save_message(
                         chat_id=chat_id, direction="incoming", message=text,
-                        worker_id=contact.get("worker_id") if contact else None,
-                        worker_name=contact["name"] if contact else tg_first,
+                        worker_id=contact.get("worker_id"),
+                        worker_name=contact["name"],
                         telegram_message_id=tg_msg_id,
                         telegram_username=tg_username,
-                        telegram_first_name=tg_first,
                     )
 
                     # 콘솔 출력
                     ts = datetime.now(KST).strftime("%H:%M:%S")
-                    name = contact["name"] if contact else tg_first
-                    role = contact["role"] if contact else "미등록"
-                    sender_str = f"{name}" + (f" (@{tg_username})" if tg_username else "")
-                    print(f"[{ts}] {sender_str} [{role}]: {text}", flush=True)
+                    name = contact["name"]
+                    role = contact["role"]
+                    uname = f" @{tg_username}" if tg_username else ""
+                    print(f"[{ts}] {name}{uname} [{role}]: {text}", flush=True)
 
-                    # 명령어 처리
+                    # 텔레그램 봇 명령어
                     if text.startswith("/"):
                         handle_command(chat_id, text, contact)
                     else:
                         handle_plain_message(chat_id, text, contact)
-
-                    # 등록된 사용자의 첫 메시지 → 전용 채팅 터미널 자동 실행
-                    if contact and chat_id not in _active_chats:
-                        open_chat_terminal(chat_id, name, contact)
 
             except requests.exceptions.Timeout:
                 continue
@@ -470,15 +562,16 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        _running = False
         # 오프라인 알림
         try:
             contacts = get_all_contacts()
             for c in contacts:
-                send_telegram(c["chat_id"], "🔴 CoinTrading 봇 오프라인")
+                send_telegram(c["chat_id"], "CoinTrading 봇 오프라인")
         except Exception:
             pass
         release_lock()
-        print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')}] 수신 데몬 종료")
+        print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')}] 멀티챗 터미널 종료")
 
 
 if __name__ == "__main__":

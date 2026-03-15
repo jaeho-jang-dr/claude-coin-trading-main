@@ -59,48 +59,56 @@ MARKET = "KRW-BTC"
 UPBIT_API = "https://api.upbit.com/v1"
 UPBIT_WS = "wss://api.upbit.com/websocket/v1"
 
-# ── 단타 전용 파라미터 (v5 보수적 강화) ──────────────────────
-# 핵심 변경: R:R 비율 역전 (기존 TP0.5/SL1.2=0.42 → TP0.8/SL0.7=1.14)
-# 기존은 승률 71%+ 필요 → v5는 승률 47%만 넘으면 수익
+# ── 단타 전용 파라미터 (공격적 모드) ──────────────────────
 
 SHORT_TERM_BUDGET = int(os.getenv("SHORT_TERM_BUDGET", "1000000"))  # 단타 전용 자금 100만원
-SHORT_TERM_MAX_TRADE = int(os.getenv("SHORT_TERM_MAX_TRADE", "200000"))  # 1회 최대 20만원 (v5: 30만→20만)
-SHORT_TERM_MAX_DAILY = int(os.getenv("SHORT_TERM_MAX_DAILY", "10"))  # 일일 최대 10회 (v5: 20→10, 질 위주)
-SHORT_TERM_STOP_LOSS = float(os.getenv("SHORT_TERM_STOP_LOSS", "0.7"))  # 손절 0.7% (v5: 1.2→0.7, 빠른 손절)
-SHORT_TERM_TAKE_PROFIT = float(os.getenv("SHORT_TERM_TAKE_PROFIT", "0.8"))  # 익절 0.8% (v5: 0.5→0.8, R:R 1.14)
-SHORT_TERM_MAX_HOLD_MIN = int(os.getenv("SHORT_TERM_MAX_HOLD_MIN", "10"))  # 최대 보유 10분 (v5: 15→10)
+SHORT_TERM_MAX_TRADE = int(os.getenv("SHORT_TERM_MAX_TRADE", "300000"))  # 1회 최대 30만원
+SHORT_TERM_MAX_DAILY = int(os.getenv("SHORT_TERM_MAX_DAILY", "20"))  # 일일 최대 20회
+SHORT_TERM_MAX_DAILY_DRYRUN = int(os.getenv("SHORT_TERM_MAX_DAILY_DRYRUN", "40"))  # DRY_RUN 전용 일일 한도 40회
+SHORT_TERM_STOP_LOSS = float(os.getenv("SHORT_TERM_STOP_LOSS", "1.2"))  # 손절 1.2%
+SHORT_TERM_TAKE_PROFIT = float(os.getenv("SHORT_TERM_TAKE_PROFIT", "0.20"))  # 익절 0.20% (v5: 0.5→0.20, 달성 가능한 목표)
+SHORT_TERM_MAX_HOLD_MIN = int(os.getenv("SHORT_TERM_MAX_HOLD_MIN", "30"))  # 최대 보유 30분 (v5: 15→30, 타임아웃 승률 83%)
 COMMISSION_PCT = 0.05  # Upbit 수수료 0.05%
-MIN_PROFIT_AFTER_FEE = COMMISSION_PCT * 2 + 0.1  # 수수료 왕복 + 최소 마진 0.1% = 0.2% (v5: 0.15→0.2)
+MIN_PROFIT_AFTER_FEE = COMMISSION_PCT * 2 + 0.05  # 수수료 왕복 + 최소 마진 0.05% = 0.15%
 
 # 뉴스 스캔 간격
-NEWS_SCAN_INTERVAL = 180  # 3분 (v5: 2분→3분, 노이즈 감소)
+NEWS_SCAN_INTERVAL = 120  # 2분 (공격: 3분→2분, 더 빈번한 스캔)
 
 # 급등/급락 감지 기준
-SPIKE_THRESHOLD_PCT = 0.8  # 최근 N분 내 0.8% 변동 (v5: 0.5→0.8, 확실한 변동만)
+SPIKE_THRESHOLD_PCT = 0.8  # 최근 N분 내 0.8% 변동 (v5: 0.5→0.8, 유의미한 변동만)
 SPIKE_WINDOW_SEC = 300  # 5분 윈도우
 
 # 고래 감지 기준
-WHALE_THRESHOLD_KRW = 50_000_000  # 5000만원 이상 (v5: 2000만→5000만, 진짜 고래만)
-WHALE_RATIO_THRESHOLD = 0.7  # 금액 비율 70% 이상 (v5: 60→70, 확실한 편향만)
+WHALE_THRESHOLD_KRW = 50_000_000  # 5000만원 이상 (v5: 2000만→5000만, 대형 고래만)
+WHALE_RATIO_THRESHOLD = 0.75  # 금액 비율 75% 이상 (v5: 60→75, 강한 방향성)
 WHALE_RATIO_WINDOW_SEC = 180  # 비율 판정 윈도우 3분
 
 # 매도 압력 방패
-SELL_PRESSURE_BLOCK_RATIO = 3.0  # 매도가 매수의 3배 이상이면 매수 차단 (v5: 4→3, 강화)
+SELL_PRESSURE_BLOCK_RATIO = 4.0  # 매도가 매수의 4배 이상이면 매수 차단
 
-# ── v5 안전 필터 (보수적 강화) ─────────────────────────
+# v5: 진입 보호 기간 — 진입 후 이 시간 동안 반대 시그널로 청산하지 않음
+GRACE_PERIOD_SEC = 180  # 3분
+
+# v5: 트레일링 스탑 설정
+TRAILING_STOP_ACTIVATE_PCT = 0.15  # 수수료 후 +0.15% 도달 시 트레일링 스탑 활성화
+TRAILING_STOP_DISTANCE_PCT = 0.10  # 최고점 대비 -0.10% 하락 시 청산
+
+# v5: 모멘텀 확인 — 진입 전 최근 60초 가격 상승 확인
+MOMENTUM_WINDOW_SEC = 60  # 모멘텀 판정 윈도우 60초
+MOMENTUM_MIN_PCT = 0.02  # 최소 +0.02% 상승 중이어야 진입
+
+# ── v4 안전 필터 ─────────────────────────
 # 1. 하락 추세에서 whale 매수 차단
 TREND_SMA_CANDLE_COUNT = 20  # SMA20 계산용 일봉 수
 # 2. 뉴스 negative일 때 매수 차단 임계값
-NEWS_BLOCK_THRESHOLD = -0.3  # 감성 점수 이하면 매수 금지 (v5: -0.5→-0.3, 강화)
+NEWS_BLOCK_THRESHOLD = -0.5  # 감성 점수 이하면 매수 금지
 # 3. 극공포 시 매수 차단
-FGI_BLOCK_THRESHOLD = 15  # FGI 15 미만이면 매수 금지 (v5: 5→15, 강화)
+FGI_BLOCK_THRESHOLD = 5  # FGI 5 미만이면 매수 금지
 # 4. 타임아웃 전 조기 손절
-EARLY_STOP_LOSS_PCT = 0.2  # 보유 시간 7분 경과 + -0.2% 이하면 조기 청산 (v5: 0.3→0.2)
-EARLY_STOP_TIME_MIN = 7  # 조기 손절 판단 시작 시간 (v5: 10→7, 더 빨리)
-# 5. 중복 진입 방지: 같은 전략 동시 1포지션만
-MAX_SAME_STRATEGY_POSITIONS = 1  # (v5: 2→1, 중복 진입 차단)
-# 6. 최소 진입 confidence (v5 신규)
-MIN_ENTRY_CONFIDENCE = 0.65  # 65% 이상만 진입 (v5 신규, 기존 0.5)
+EARLY_STOP_LOSS_PCT = 0.3  # 보유 시간 15분 경과 + -0.3% 이하면 조기 청산
+EARLY_STOP_TIME_MIN = 15  # 조기 손절 판단 시작 시간 (v5: 10→15, 보유 시간 확대에 맞춤)
+# 5. 중복 진입 방지: 같은 전략으로 동시 1포지션만 (v5: 2→1, 집중)
+MAX_SAME_STRATEGY_POSITIONS = 1
 
 # ── 로깅 설정 ──────────────────────────────────────────
 
@@ -135,6 +143,9 @@ class Position:
     exit_time: datetime | None = None
     exit_reason: str | None = None
     pnl_pct: float | None = None
+    # v5: 트레일링 스탑
+    trailing_stop_active: bool = False
+    highest_pnl_pct: float = 0.0  # 보유 중 최고 수익률 (수수료 후)
 
 
 @dataclass
@@ -194,7 +205,9 @@ SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
 def db_insert(table: str, data: dict):
     """Supabase REST API로 데이터 삽입 (실패해도 봇에 영향 없음, 에러 로깅)"""
+    _log = logging.getLogger("short_term")
     if not SUPABASE_URL or not SUPABASE_KEY:
+        _log.warning(f"[DB] {table} 삽입 스킵 — SUPABASE 환경변수 미설정")
         return
     try:
         resp = requests.post(
@@ -209,16 +222,14 @@ def db_insert(table: str, data: dict):
             timeout=5,
         )
         if resp.status_code >= 300:
-            logging.getLogger("short_term").warning(
-                f"[DB] {table} 삽입 실패 ({resp.status_code}): {resp.text[:200]}"
+            _log.warning(
+                f"[DB] {table} 삽입 실패 ({resp.status_code}): {resp.text[:300]}"
             )
-        # v4: 로컬 백업 -- DB 실패해도 기록 유지
-        if table in ("scalp_trades", "scalp_trade_log", "scalp_sessions"):
-            _backup_to_local(table, data)
+        # 로컬 백업 — 모든 중요 테이블 (DB 실패해도 기록 유지)
+        _backup_to_local(table, data)
     except Exception as e:
-        logging.getLogger("short_term").warning(f"[DB] {table} 예외: {e}")
-        if table in ("scalp_trades", "scalp_trade_log", "scalp_sessions"):
-            _backup_to_local(table, data)
+        _log.warning(f"[DB] {table} 예외: {e}")
+        _backup_to_local(table, data)
 
 
 def _backup_to_local(table: str, data: dict):
@@ -335,6 +346,7 @@ class ShortTermTrader:
         self._fgi: int = 50
         self._last_context_update: float = 0
         self._trade_counter: int = 0  # 세션 내 거래 번호
+        self._last_snapshot_time: float = 0
 
         # 로그 노이즈 방지
         self._last_block_reason: set = set()
@@ -404,6 +416,75 @@ class ShortTermTrader:
         except Exception as e:
             log.debug(f"시장 컨텍스트 업데이트 실패: {e}")
 
+    def record_market_snapshot(self):
+        """5분마다 시장 스냅샷을 DB에 기록 (ML 학습용)"""
+        try:
+            # 체결 강도 계산 (최근 60초)
+            now_t = time.time()
+            cutoff_60s = now_t - 60
+            recent_trades = [t for t in self.trade_history if t["time"] > cutoff_60s]
+            buy_vol = sum(t["volume"] for t in recent_trades if t["side"] == "BID")
+            sell_vol = sum(t["volume"] for t in recent_trades if t["side"] == "ASK")
+            total_vol = buy_vol + sell_vol
+            pressure_ratio = round(buy_vol / total_vol, 3) if total_vol > 0 else 0.5
+
+            # 고래 통계 (최근 3분)
+            cutoff_whale = now_t - 180
+            recent_whales = [w for w in self.whale_recent if w["time"] > cutoff_whale]
+            whale_buys = [w for w in recent_whales if w["side"] == "BID"]
+            whale_sells = [w for w in recent_whales if w["side"] == "ASK"]
+            whale_buy_krw = sum(int(w["krw"]) for w in whale_buys)
+            whale_sell_krw = sum(int(w["krw"]) for w in whale_sells)
+            whale_total = whale_buy_krw + whale_sell_krw
+            whale_buy_ratio = round(whale_buy_krw / whale_total, 3) if whale_total > 0 else 0.5
+
+            # 모멘텀 계산
+            def calc_momentum(seconds):
+                cutoff = now_t - seconds
+                window = [p["price"] for p in self.price_history if p["time"] > cutoff]
+                if len(window) >= 2:
+                    return round((window[-1] - window[0]) / window[0] * 100, 3)
+                return None
+
+            # 변동성 (5분 가격 표준편차/평균 * 100)
+            cutoff_5m = now_t - 300
+            prices_5m = [p["price"] for p in self.price_history if p["time"] > cutoff_5m]
+            volatility_5m = None
+            if len(prices_5m) >= 10:
+                import statistics
+                mean_p = statistics.mean(prices_5m)
+                std_p = statistics.stdev(prices_5m)
+                volatility_5m = round(std_p / mean_p * 100, 3)
+
+            snapshot = {
+                "cycle_id": self.cycle_id,
+                "btc_price": int(self.current_price),
+                "rsi_1h": round(self._rsi, 2),
+                "sma20": int(self._sma20) if self._sma20 else None,
+                "market_trend": self._market_trend,
+                "fgi": self._fgi,
+                "news_sentiment": self.last_news_sentiment,
+                "news_score": round(self.news_sentiment_score, 2),
+                "whale_buy_count": len(whale_buys),
+                "whale_sell_count": len(whale_sells),
+                "whale_buy_krw": whale_buy_krw,
+                "whale_sell_krw": whale_sell_krw,
+                "whale_buy_ratio": whale_buy_ratio,
+                "trade_buy_volume": round(buy_vol, 8),
+                "trade_sell_volume": round(sell_vol, 8),
+                "trade_pressure_ratio": pressure_ratio,
+                "momentum_1m_pct": calc_momentum(60),
+                "momentum_5m_pct": calc_momentum(300),
+                "momentum_15m_pct": calc_momentum(900),
+                "volatility_5m": volatility_5m,
+                "open_positions": len(self.positions),
+                "daily_trade_count": self.daily_trade_count,
+                "daily_pnl_krw": int(self.daily_pnl),
+            }
+            db_insert("scalp_market_snapshot", snapshot)
+        except Exception as e:
+            log.debug(f"시장 스냅샷 기록 실패: {e}")
+
     def check_safety_filters(self, signal: "TradeSignal") -> tuple[bool, str]:
         """v4 안전 필터: 5가지 바보짓 방지. 통과 못하면 (False, 사유) 반환"""
         if signal.action != "buy":
@@ -429,16 +510,18 @@ class ShortTermTrader:
             return False, f"{signal.strategy} 중복 진입 차단 (이미 {same_strategy_count}건)"
 
         # 필터 5: 하락 추세 + RSI 과매도 접근 시 전체 매수 차단
-        if self._market_trend == "downtrend" and self._rsi < 40:
+        if self._market_trend == "downtrend" and self._rsi < 35:
             return False, f"하락추세 + RSI {self._rsi:.0f} 과매도 접근 -- 매수 차단"
 
-        # 필터 6 (v5): 하락추세에서 모든 매수 시그널 차단 (whale 외에도)
-        if self._market_trend == "downtrend" and signal.action == "buy":
-            return False, f"하락추세 전체 매수 차단 (trend={self._market_trend})"
-
-        # 필터 7 (v5): RSI 과매수 구간 매수 차단
-        if self._rsi > 70 and signal.action == "buy":
-            return False, f"RSI {self._rsi:.0f} 과매수 -- 매수 차단"
+        # v5 필터 6: 모멘텀 확인 — 최근 60초 가격이 상승 중이어야 진입
+        if len(self.price_history) >= 10:
+            now_t = time.time()
+            cutoff = now_t - MOMENTUM_WINDOW_SEC
+            window = [p["price"] for p in self.price_history if p["time"] > cutoff]
+            if len(window) >= 5:
+                momentum_pct = (window[-1] - window[0]) / window[0] * 100
+                if momentum_pct < MOMENTUM_MIN_PCT:
+                    return False, f"모멘텀 부족 ({momentum_pct:+.3f}%, 최소 {MOMENTUM_MIN_PCT}%)"
 
         return True, "OK"
 
@@ -464,6 +547,35 @@ class ShortTermTrader:
             if block_filter:
                 row["block_filter"] = block_filter
                 row["block_reason"] = block_reason[:200] if block_reason else None
+
+            # v6: ML 컨텍스트 추가
+            now_t = time.time()
+            cutoff_60s = now_t - 60
+            window = [p["price"] for p in self.price_history if p["time"] > cutoff_60s]
+            if len(window) >= 2:
+                row["momentum_1m_pct"] = round((window[-1] - window[0]) / window[0] * 100, 3)
+
+            recent_trades = [t for t in self.trade_history if t["time"] > cutoff_60s]
+            buy_vol = sum(t["volume"] for t in recent_trades if t["side"] == "BID")
+            sell_vol = sum(t["volume"] for t in recent_trades if t["side"] == "ASK")
+            total_vol = buy_vol + sell_vol
+            if total_vol > 0:
+                row["trade_pressure_ratio"] = round(buy_vol / total_vol, 3)
+
+            cutoff_whale = now_t - 180
+            recent_whales = [w for w in self.whale_recent if w["time"] > cutoff_whale]
+            whale_buys_krw = sum(w["krw"] for w in recent_whales if w["side"] == "BID")
+            whale_total_krw = sum(w["krw"] for w in recent_whales)
+            if whale_total_krw > 0:
+                row["whale_buy_ratio"] = round(whale_buys_krw / whale_total_krw, 3)
+
+            cutoff_5m = now_t - 300
+            prices_5m = [p["price"] for p in self.price_history if p["time"] > cutoff_5m]
+            if len(prices_5m) >= 10:
+                import statistics
+                mean_p = statistics.mean(prices_5m)
+                std_p = statistics.stdev(prices_5m)
+                row["volatility_5m"] = round(std_p / mean_p * 100, 3)
 
             db_insert("signal_attempt_log", row)
         except Exception as e:
@@ -518,6 +630,9 @@ class ShortTermTrader:
             "lesson": lesson,
             "dry_run": self.dry_run,
             "cycle_id": self.cycle_id,
+            "trailing_stop_hit": pos.trailing_stop_active and "트레일링" in (pos.exit_reason or ""),
+            "highest_pnl_pct": round(pos.highest_pnl_pct, 3),
+            "grace_period_saved": False,
         })
 
     def emergency_stop(self, reason: str):
@@ -778,24 +893,25 @@ class ShortTermTrader:
                 await asyncio.sleep(30)
 
     def check_news_signal(self) -> TradeSignal | None:
-        """뉴스 기반 매매 시그널 판단"""
+        """v5: 뉴스는 모니터링 전용 — 직접 매매 시그널 생성하지 않음.
+        매도 시그널만 반환 (보유 포지션 보호용), 매수는 안전 필터로만 작동."""
         if abs(self.news_sentiment_score) < 0.3:
             return None
 
+        # v5: 매수 시그널 제거 — 0% 승률이었던 뉴스 매수 중단
+        # 뉴스 긍정은 다른 전략의 confidence 보너스로만 활용
         if self.news_sentiment_score >= 0.3:
+            return None  # 매수 시그널 비활성화
+
+        # 강한 부정 뉴스일 때만 매도 시그널 (보유 포지션 보호)
+        if self.news_sentiment_score <= -0.5:
             return TradeSignal(
                 strategy="news",
-                action="buy",
+                action="sell",
                 confidence=min(abs(self.news_sentiment_score), 1.0),
-                reason=f"뉴스 강한 긍정 (score: {self.news_sentiment_score:+.2f})",
+                reason=f"뉴스 강한 부정 (score: {self.news_sentiment_score:+.2f})",
             )
-        # score <= -0.4 (guaranteed by early return above)
-        return TradeSignal(
-            strategy="news",
-            action="sell",
-            confidence=min(abs(self.news_sentiment_score), 1.0),
-            reason=f"뉴스 강한 부정 (score: {self.news_sentiment_score:+.2f})",
-        )
+        return None
 
     # ── 전략 2: 급등/급락 리바운드 ────────────────────
 
@@ -955,7 +1071,7 @@ class ShortTermTrader:
     # ── 포지션 관리 ───────────────────────────────────
 
     def check_position_exit(self) -> list[tuple[Position, str]]:
-        """보유 포지션의 익절/손절/시간제한 확인"""
+        """보유 포지션의 익절/손절/트레일링/시간제한 확인"""
         exits = []
         now = datetime.now(KST)
         fee_roundtrip = COMMISSION_PCT * 2  # 왕복 수수료 0.10%
@@ -968,13 +1084,28 @@ class ShortTermTrader:
             pnl_pct = raw_pnl - fee_roundtrip  # 수수료 차감 실질 수익률
             hold_sec = (now - pos.entry_time).total_seconds()
 
+            # v5: 트레일링 스탑 업데이트
+            if pnl_pct > pos.highest_pnl_pct:
+                pos.highest_pnl_pct = pnl_pct
+            if not pos.trailing_stop_active and pnl_pct >= TRAILING_STOP_ACTIVATE_PCT:
+                pos.trailing_stop_active = True
+                log.info(
+                    f"[{pos.strategy}] 트레일링 스탑 활성화: "
+                    f"현재 {pnl_pct:+.2f}%, 최고 {pos.highest_pnl_pct:+.2f}%"
+                )
+
             # 익절 (수수료 차감 후 기준)
             if pnl_pct >= pos.take_profit_pct:
                 exits.append((pos, f"익절 +{pnl_pct:.2f}% (수수료 후)"))
+            # v5: 트레일링 스탑 — 최고점 대비 하락 시 청산
+            elif pos.trailing_stop_active:
+                drawdown = pos.highest_pnl_pct - pnl_pct
+                if drawdown >= TRAILING_STOP_DISTANCE_PCT:
+                    exits.append((pos, f"트레일링 스탑: 최고 {pos.highest_pnl_pct:+.2f}% → 현재 {pnl_pct:+.2f}% (하락 {drawdown:.2f}%)"))
             # 손절
             elif pnl_pct <= -pos.stop_loss_pct:
                 exits.append((pos, f"손절 {pnl_pct:.2f}%"))
-            # v4: 조기 손절 -- 10분 경과 + -0.3% 이하면 타임아웃 기다리지 않고 청산
+            # 조기 손절 -- 15분 경과 + -0.3% 이하면 타임아웃 기다리지 않고 청산
             elif hold_sec > EARLY_STOP_TIME_MIN * 60 and pnl_pct <= -EARLY_STOP_LOSS_PCT:
                 exits.append((pos, f"조기 손절: {hold_sec/60:.0f}분 경과 + {pnl_pct:+.2f}%"))
             # 시간 제한
@@ -1000,7 +1131,8 @@ class ShortTermTrader:
                     return False, "자동 긴급정지 활성화"
             except Exception:
                 pass
-        if self.daily_trade_count >= SHORT_TERM_MAX_DAILY:
+        max_daily = SHORT_TERM_MAX_DAILY_DRYRUN if self.dry_run else SHORT_TERM_MAX_DAILY
+        if self.daily_trade_count >= max_daily:
             return False, "daily_limit"
         if self.used_budget >= SHORT_TERM_BUDGET:
             return False, "budget_limit"
@@ -1041,6 +1173,8 @@ class ShortTermTrader:
                 filter_name = "duplicate_strategy"
             elif "과매도" in block_reason:
                 filter_name = "downtrend_oversold"
+            elif "모멘텀" in block_reason:
+                filter_name = "momentum_lacking"
             self.log_signal_attempt(signal.strategy, "blocked", signal=signal,
                                     block_filter=filter_name, block_reason=block_reason)
             return
@@ -1207,51 +1341,56 @@ class ShortTermTrader:
             "dry_run": self.dry_run,
         })
 
-        # decisions 테이블 기록 (RL 훈련 데이터용 — 매수 결정)
-        entry_reason = (
-            f"[초단타-{pos.strategy}] {getattr(pos, '_signal_reason', '')} | "
-            f"추세={self._market_trend} RSI={self._rsi:.1f} FGI={self._fgi}"
-        )
-        db_insert("decisions", {
-            "market": MARKET,
-            "decision": "매수",
-            "confidence": getattr(pos, '_confidence', 0.5),
-            "reason": entry_reason,
-            "current_price": int(pos.entry_price),
-            "trade_amount": int(pos.amount_krw),
-            "rsi_value": round(self._rsi, 2),
-            "fear_greed_value": self._fgi,
-            "sma20_price": int(self._sma20) if self._sma20 else None,
-            "executed": not self.dry_run,
-            "source": "short_term",
-            "cycle_id": self.cycle_id,
-            "dry_run": self.dry_run,
-            "created_at": pos.entry_time.isoformat(),
-        })
+        # decisions 테이블 기록 (RL 훈련 데이터용 — 매수/매도 각각 독립 insert)
+        try:
+            entry_reason = (
+                f"[초단타-{pos.strategy}] {getattr(pos, '_signal_reason', '')} | "
+                f"추세={self._market_trend} RSI={self._rsi:.1f} FGI={self._fgi}"
+            )
+            db_insert("decisions", {
+                "market": MARKET,
+                "decision": "매수",
+                "confidence": getattr(pos, '_confidence', 0.5),
+                "reason": entry_reason,
+                "current_price": int(pos.entry_price),
+                "trade_amount": int(pos.amount_krw),
+                "rsi_value": round(self._rsi, 2),
+                "fear_greed_value": self._fgi,
+                "sma20_price": int(self._sma20) if self._sma20 else None,
+                "executed": not self.dry_run,
+                "source": "short_term",
+                "cycle_id": self.cycle_id,
+                "dry_run": self.dry_run,
+                "created_at": pos.entry_time.isoformat(),
+            })
+        except Exception as e:
+            log.error(f"[DB] decisions 매수 기록 실패: {e}")
 
-        # decisions 테이블 기록 (RL 훈련 데이터용 — 매도 결정)
-        exit_reason_full = (
-            f"[초단타-{pos.strategy}] {reason} | "
-            f"진입 {pos.entry_price:,.0f} → 청산 {exit_price:,.0f} | "
-            f"손익 {pnl_pct:+.2f}% ({pnl_krw:+,.0f}원)"
-        )
-        db_insert("decisions", {
-            "market": MARKET,
-            "decision": "매도",
-            "confidence": getattr(pos, '_confidence', 0.5),
-            "reason": exit_reason_full,
-            "current_price": int(exit_price),
-            "trade_amount": int(pos.amount_krw),
-            "trade_volume": float(pos.btc_qty),
-            "rsi_value": round(self._rsi, 2),
-            "fear_greed_value": self._fgi,
-            "sma20_price": int(self._sma20) if self._sma20 else None,
-            "executed": not self.dry_run,
-            "profit_loss": round(pnl_pct, 3),
-            "source": "short_term",
-            "cycle_id": self.cycle_id,
-            "dry_run": self.dry_run,
-        })
+        try:
+            exit_reason_full = (
+                f"[초단타-{pos.strategy}] {reason} | "
+                f"진입 {pos.entry_price:,.0f} → 청산 {exit_price:,.0f} | "
+                f"손익 {pnl_pct:+.2f}% ({pnl_krw:+,.0f}원)"
+            )
+            db_insert("decisions", {
+                "market": MARKET,
+                "decision": "매도",
+                "confidence": getattr(pos, '_confidence', 0.5),
+                "reason": exit_reason_full,
+                "current_price": int(exit_price),
+                "trade_amount": int(pos.amount_krw),
+                "trade_volume": float(pos.btc_qty),
+                "rsi_value": round(self._rsi, 2),
+                "fear_greed_value": self._fgi,
+                "sma20_price": int(self._sma20) if self._sma20 else None,
+                "executed": not self.dry_run,
+                "profit_loss": round(pnl_pct, 3),
+                "source": "short_term",
+                "cycle_id": self.cycle_id,
+                "dry_run": self.dry_run,
+            })
+        except Exception as e:
+            log.error(f"[DB] decisions 매도 기록 실패: {e}")
 
         send_telegram(
             f"<b>[초단타 매도]</b> {pos.strategy}\n"
@@ -1287,6 +1426,11 @@ class ShortTermTrader:
                 # v4: 시장 컨텍스트 주기적 업데이트
                 self.update_market_context()
 
+                # v6: 시장 스냅샷 기록 (5분 간격)
+                if time.time() - self._last_snapshot_time >= 300:
+                    self.record_market_snapshot()
+                    self._last_snapshot_time = time.time()
+
                 # 1) 보유 포지션 청산 확인
                 exits = self.check_position_exit()
                 for pos, reason in exits:
@@ -1317,12 +1461,19 @@ class ShortTermTrader:
                 # 3) 시그널 우선순위 처리
                 buy_signals = [s for s in signals if s.action == "buy"]
                 sell_signals = [s for s in signals if s.action == "sell"]
+                now_dt = datetime.now(KST)
 
-                # 매도 시그널: 보유 중이면 청산
+                # v5: 매도 시그널 — 전략별 독립 청산 + 진입 보호 기간
                 if sell_signals and self.positions:
-                    best_sell = max(sell_signals, key=lambda s: s.confidence)
-                    for pos in list(self.positions):
-                        self.execute_exit(pos, f"{best_sell.strategy}: {best_sell.reason}")
+                    for sell_sig in sell_signals:
+                        for pos in list(self.positions):
+                            # v5: 진입 보호 기간 — 진입 후 3분 이내면 시그널 청산 무시
+                            hold_sec = (now_dt - pos.entry_time).total_seconds()
+                            if hold_sec < GRACE_PERIOD_SEC:
+                                continue
+                            # v5: 전략별 독립 청산 — 같은 전략 또는 뉴스 강부정만 청산
+                            if sell_sig.strategy == pos.strategy or sell_sig.strategy == "news":
+                                self.execute_exit(pos, f"{sell_sig.strategy}: {sell_sig.reason}")
 
                 # 매수 시그널: 매도 압력 방패 확인 후 실행
                 if buy_signals:
@@ -1334,7 +1485,10 @@ class ShortTermTrader:
                             block_filter="sell_pressure", block_reason="매도 압력 방패 발동")
                     else:
                         best_buy = max(buy_signals, key=lambda s: s.confidence)
-                        if best_buy.confidence >= MIN_ENTRY_CONFIDENCE:  # v5: 65%
+                        # v5: 뉴스 긍정일 때 confidence 보너스 (다른 전략 강화)
+                        if self.news_sentiment_score >= 0.3 and best_buy.strategy != "news":
+                            best_buy.confidence = min(best_buy.confidence + 0.1, 1.0)
+                        if best_buy.confidence >= 0.5:  # 최소 신뢰도 50%
                             self.execute_entry(best_buy)
 
                 await asyncio.sleep(1)
@@ -1791,11 +1945,16 @@ class ShortTermTrader:
         log.info(f"AI 단타 트레이딩 봇 시작 [{mode}]")
         log.info(f"  단타 자금: {SHORT_TERM_BUDGET:,}원")
         log.info(f"  1회 최대: {SHORT_TERM_MAX_TRADE:,}원")
-        log.info(f"  일일 한도: {SHORT_TERM_MAX_DAILY}회")
+        effective_daily = SHORT_TERM_MAX_DAILY_DRYRUN if self.dry_run else SHORT_TERM_MAX_DAILY
+        log.info(f"  일일 한도: {effective_daily}회{' (DRY_RUN 확장)' if self.dry_run else ''}")
         log.info(f"  익절: +{SHORT_TERM_TAKE_PROFIT}% / 손절: -{SHORT_TERM_STOP_LOSS}%")
         log.info(f"  최대 보유: {SHORT_TERM_MAX_HOLD_MIN}분")
         log.info(f"  수수료 왕복: {COMMISSION_PCT*2}%")
         log.info(f"  최소 수익 마진: {MIN_PROFIT_AFTER_FEE}%")
+        log.info(f"  [v5] 트레일링: +{TRAILING_STOP_ACTIVATE_PCT}% 활성 / -{TRAILING_STOP_DISTANCE_PCT}% 거리")
+        log.info(f"  [v5] 진입 보호: {GRACE_PERIOD_SEC}초 / 모멘텀: {MOMENTUM_MIN_PCT}%")
+        log.info(f"  [v5] 고래 기준: {WHALE_THRESHOLD_KRW/10000:.0f}만원 / 비율: {WHALE_RATIO_THRESHOLD:.0%}")
+        log.info(f"  [v5] 뉴스 매수: 비활성 (모니터링 전용)")
         log.info(f"{'='*50}")
 
         sound_alert("초단타 봇 시작했어요.")
@@ -1918,7 +2077,7 @@ class ShortTermTrader:
             "budget_limit": SHORT_TERM_BUDGET,
             "config": {
                 "max_trade": SHORT_TERM_MAX_TRADE,
-                "max_daily": SHORT_TERM_MAX_DAILY,
+                "max_daily": SHORT_TERM_MAX_DAILY_DRYRUN if self.dry_run else SHORT_TERM_MAX_DAILY,
                 "stop_loss_pct": SHORT_TERM_STOP_LOSS,
                 "take_profit_pct": SHORT_TERM_TAKE_PROFIT,
                 "max_hold_min": SHORT_TERM_MAX_HOLD_MIN,

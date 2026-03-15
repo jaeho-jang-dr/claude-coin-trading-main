@@ -316,7 +316,7 @@ class KimchirangBot:
         # 주기적 작업이 필요한 tick에서만 stats/pos 생성
         need_log = (tick % 10 == 0)
         need_db = (tick % 60 == 0)
-        need_notify = (tick % 300 == 0)
+        need_notify = False  # 텔레그램 상태 보고 중지 (2026-03-14)
 
         if need_log or need_db or need_notify:
             stats = self.engine.get_stats()

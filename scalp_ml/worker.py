@@ -1006,6 +1006,22 @@ def main():
         log.error("WORKER_TOKEN 미설정 — 초대코드로 등록하세요: --register --invite-code <코드>")
         sys.exit(1)
 
+    # ── 텔레그램 리스너 자동 시작 (봇 토큰 있으면) ──
+    _tg_listener_proc = None
+    if os.getenv("TELEGRAM_BOT_TOKEN"):
+        try:
+            listener_script = PROJECT_DIR / "scripts" / "telegram_listener.py"
+            if listener_script.exists():
+                import subprocess
+                _tg_listener_proc = subprocess.Popen(
+                    [sys.executable, str(listener_script)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    cwd=str(PROJECT_DIR),
+                )
+                log.info(f"텔레그램 리스너 자동 시작 (PID {_tg_listener_proc.pid})")
+        except Exception as e:
+            log.warning(f"텔레그램 리스너 시작 실패: {e}")
+
     if args.sync:
         # 수동 동기화 모드: 프리뷰 → 안내 → 확인 → 업로드
         worker = MLWorker(

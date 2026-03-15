@@ -48,6 +48,7 @@ HEADERS = {
 POLL_INTERVAL = 3
 CLEANUP_INTERVAL = 3600
 _last_cleanup = 0
+_active_chats: dict[str, "subprocess.Popen"] = {}  # chat_id → 터미널 프로세스
 
 
 # ── 연락처 조회 ──────────────────────────────────
@@ -276,17 +277,99 @@ def handle_plain_message(chat_id: str, text: str, sender: dict | None):
     # 매칭 안 되면 기록만 (관리자가 inbox에서 확인)
 
 
+# ── 채팅 터미널 자동 실행 ──────────────────────
+
+def open_chat_terminal(chat_id: str, name: str, contact: dict):
+    """등록된 사용자가 메시지를 보내면 전용 채팅 터미널을 자동 실행"""
+    # 이미 열린 터미널이 살아있는지 확인
+    if chat_id in _active_chats:
+        proc = _active_chats[chat_id]
+        if proc.poll() is None:
+            return  # 아직 실행 중
+        del _active_chats[chat_id]
+
+    worker_id = contact.get("worker_id") or name
+    title = f"Chat - {name} [{contact.get('role', '?')}]"
+
+    try:
+        if sys.platform == "win32":
+            # Windows: 새 cmd 창으로 chat 실행
+            cmd = (
+                f'start "{title}" cmd /k '
+                f'"cd /d {PROJECT_DIR} && python scripts/worker_admin.py chat '
+                f'--chat-id {chat_id}"'
+            )
+            proc = _sp.Popen(cmd, shell=True, cwd=str(PROJECT_DIR))
+        else:
+            # Linux/Mac: 새 터미널
+            proc = _sp.Popen(
+                [sys.executable, "scripts/worker_admin.py", "chat",
+                 "--chat-id", chat_id],
+                cwd=str(PROJECT_DIR),
+            )
+
+        _active_chats[chat_id] = proc
+        print(f"  💬 채팅 터미널 열림: {name} (chat_id={chat_id})", flush=True)
+    except Exception as e:
+        print(f"  채팅 터미널 실행 실패: {e}", flush=True)
+
+
 # ── 메인 루프 ──────────────────────────────────
+
+import subprocess as _sp
+
+LOCK_FILE = PROJECT_DIR / "data" / "telegram_listener.lock"
+
+
+def acquire_lock():
+    """중복 실행 방지 — PID 기반 락 파일"""
+    if LOCK_FILE.exists():
+        try:
+            old_pid = int(LOCK_FILE.read_text().strip())
+            # 프로세스가 살아있는지 확인
+            import subprocess
+            r = subprocess.run(["tasklist", "/FI", f"PID eq {old_pid}"],
+                               capture_output=True, text=True, timeout=5)
+            if str(old_pid) in r.stdout:
+                print(f"이미 실행 중 (PID {old_pid}). 종료합니다.")
+                sys.exit(0)
+        except Exception:
+            pass
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LOCK_FILE.write_text(str(os.getpid()))
+
+
+def release_lock():
+    """락 파일 삭제"""
+    try:
+        LOCK_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
 
 def main():
     if not TG_TOKEN:
         print("TELEGRAM_BOT_TOKEN 미설정")
         sys.exit(1)
 
-    print(f"[{datetime.now(KST).strftime('%H:%M:%S')}] 텔레그램 수신 데몬 시작 (폴링 {POLL_INTERVAL}초)")
+    acquire_lock()
+
+    print(f"[{datetime.now(KST).strftime('%H:%M:%S')}] 텔레그램 수신 데몬 시작 (PID {os.getpid()}, 폴링 {POLL_INTERVAL}초)")
     print(f"  봇 명령어: /start /list /msg /all /chat_id")
     print(f"  단축 전송: 이름>메시지  또는  이름: 메시지")
     print("-" * 50)
+
+    # 연결 알림: 등록된 모든 연락처에게 온라인 알림
+    try:
+        contacts = get_all_contacts()
+        ts = datetime.now(KST).strftime("%H:%M")
+        for c in contacts:
+            send_telegram(c["chat_id"],
+                f"🟢 CoinTrading 봇 온라인 ({ts} KST)\n"
+                f"명령어: /list /msg /all /chat_id")
+        print(f"  연결 알림 발송: {len(contacts)}명", flush=True)
+    except Exception:
+        pass
 
     # 기존 메시지 건너뛰기
     offset = 0
@@ -371,6 +454,10 @@ def main():
                     else:
                         handle_plain_message(chat_id, text, contact)
 
+                    # 등록된 사용자의 첫 메시지 → 전용 채팅 터미널 자동 실행
+                    if contact and chat_id not in _active_chats:
+                        open_chat_terminal(chat_id, name, contact)
+
             except requests.exceptions.Timeout:
                 continue
             except requests.exceptions.ConnectionError:
@@ -381,6 +468,16 @@ def main():
                 time.sleep(5)
 
     except KeyboardInterrupt:
+        pass
+    finally:
+        # 오프라인 알림
+        try:
+            contacts = get_all_contacts()
+            for c in contacts:
+                send_telegram(c["chat_id"], "🔴 CoinTrading 봇 오프라인")
+        except Exception:
+            pass
+        release_lock()
         print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')}] 수신 데몬 종료")
 
 

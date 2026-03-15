@@ -103,190 +103,709 @@ def send_telegram(text: str):
 
 
 # ═══════════════════════════════════════════════════
-# Mac Mini: 시그널 품질 분류기 (LightGBM + XGBoost)
+# Mac Mini v2: 3-데몬 병렬 — 수집 + 백테스트 + 레짐 학습
 # ═══════════════════════════════════════════════════
+
+SNAPSHOT_DIR = PROJECT_DIR / "data" / "scalp_snapshots"
+SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+
+# 7일 실행 제한 (초)
+MAX_RUN_SECONDS = 7 * 24 * 3600
+_mac_running = True
+
 
 def run_mac_mini():
     """
-    Mac Mini 1주일 훈련 계획
+    Mac Mini 1주일 계획 v2 — 3 데몬 병렬 운영
 
-    Day 1-2: 데이터 수집 + LightGBM 기본 모델
-    Day 3-4: XGBoost 대조 모델 + 피처 실험
-    Day 5-6: 앙상블 (LightGBM + XGBoost) + 하이퍼파라미터 탐색
-    Day 7:   최종 평가 + 모델 선택
+    데몬 1: 고해상도 시장 데이터 수집 (1분 간격, 24/7)
+    데몬 2: 롤링 백테스트 엔진 (6시간 주기, 2160 파라미터 조합)
+    데몬 3: 시장 레짐 탐지 + 적응형 필터 학습 (3시간 주기)
     """
+    import threading
+
+    global _mac_running
     machine = "mac-mini"
     log.info(f"{'='*60}")
-    log.info(f"  Mac Mini 훈련 시작 — 시그널 품질 분류기")
+    log.info(f"  Mac Mini v2 훈련 시작 — 3-데몬 병렬 (7일)")
+    log.info(f"  데몬 1: 고해상도 수집 (1분)")
+    log.info(f"  데몬 2: 롤링 백테스트 (6시간)")
+    log.info(f"  데몬 3: 레짐 탐지 + 필터 (3시간)")
     log.info(f"{'='*60}")
-    send_telegram(f"[Mac Mini] 1주일 훈련 시작 — LightGBM/XGBoost 시그널 분류기")
+    send_telegram(
+        f"🖥️ [Mac Mini v2] 1주일 훈련 시작\n"
+        f"데몬 1: 고해상도 수집 (1분 간격)\n"
+        f"데몬 2: 백테스트 (6h 주기, 2160조합)\n"
+        f"데몬 3: HMM 레짐 + LightGBM 필터 (3h 주기)"
+    )
+    log_to_db(machine, "v2_start", "running")
 
-    phases = [
-        # (이름, 함수, 설명)
-        ("phase1_data", _mac_phase1_data, "14일 1분봉 수집 + 피처 생성"),
-        ("phase2_lgbm_base", _mac_phase2_lgbm, "LightGBM 기본 모델 (7/14/30일)"),
-        ("phase3_xgboost", _mac_phase3_xgboost, "XGBoost 대조 모델"),
-        ("phase4_feature_exp", _mac_phase4_features, "피처 실험 (확장 피처셋)"),
-        ("phase5_hyperparam", _mac_phase5_hyperparam, "하이퍼파라미터 그리드 탐색"),
-        ("phase6_ensemble", _mac_phase6_ensemble, "앙상블 (LGB+XGB+투표)"),
-        ("phase7_final", _mac_phase7_final, "최종 평가 + 최적 모델 선택"),
+    start_time = time.time()
+
+    # 초기 데이터 수집 (캐시 없으면)
+    _mac_init_data()
+
+    threads = [
+        threading.Thread(target=_daemon_collector, name="collector", daemon=True),
+        threading.Thread(target=_daemon_backtester, name="backtester", daemon=True),
+        threading.Thread(target=_daemon_regime, name="regime", daemon=True),
     ]
+    for t in threads:
+        t.start()
 
-    _run_phases(machine, phases)
+    # 메인: 30분마다 상태 보고
+    report_interval = 1800
+    last_report = time.time()
+    daily_report_hour = -1
+
+    while _mac_running and (time.time() - start_time) < MAX_RUN_SECONDS:
+        time.sleep(60)
+
+        now = datetime.now(KST)
+        elapsed_h = (time.time() - start_time) / 3600
+
+        # 30분마다 상태 로그
+        if time.time() - last_report >= report_interval:
+            alive = [t.name for t in threads if t.is_alive()]
+            dead = [t.name for t in threads if not t.is_alive()]
+            snap_count = len(list(SNAPSHOT_DIR.glob("snapshot_*.parquet")))
+            bt_file = MODEL_DIR / "backtest_results.json"
+            regime_file = MODEL_DIR / "regime_detector.pkl"
+
+            log.info(
+                f"[Mac Mini] {elapsed_h:.1f}h 경과 | "
+                f"데몬: {','.join(alive)} | "
+                f"스냅샷: {snap_count}개 | "
+                f"백테스트: {'있음' if bt_file.exists() else '대기'} | "
+                f"레짐: {'있음' if regime_file.exists() else '대기'}"
+            )
+
+            # 죽은 데몬 재시작
+            for i, t in enumerate(threads):
+                if not t.is_alive():
+                    log.warning(f"  데몬 {t.name} 죽음 — 재시작")
+                    targets = [_daemon_collector, _daemon_backtester, _daemon_regime]
+                    new_t = threading.Thread(target=targets[i], name=t.name, daemon=True)
+                    new_t.start()
+                    threads[i] = new_t
+
+            last_report = time.time()
+
+        # 매일 09시에 일일 보고
+        if now.hour == 9 and now.hour != daily_report_hour:
+            daily_report_hour = now.hour
+            _mac_daily_report(elapsed_h)
+
+    _mac_running = False
+    log.info(f"[Mac Mini] 7일 훈련 종료 ({(time.time()-start_time)/3600:.1f}h)")
+    _mac_final_report()
+    send_telegram("[Mac Mini v2] 1주일 훈련 완료!")
+    log_to_db(machine, "v2_complete", "completed")
 
 
-def _mac_phase1_data():
-    """1분봉 데이터 수집 (7, 14, 30일)"""
-    from scalp_ml.train_lgbm import collect_candles
+# ── 데몬 1: 고해상도 시장 데이터 수집 ────────────────
+
+def _daemon_collector():
+    """1분 간격 시장 데이터 수집 (호가 + 체결 + 1분봉)"""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    log.info("[수집기] 시작 — 1분 간격 고해상도 수집")
+    buffer = []
+    flush_interval = 300  # 5분마다 parquet 저장
+
+    while _mac_running:
+        try:
+            now = datetime.now(KST)
+            row = {"timestamp": now.isoformat()}
+
+            # 1) 현재가 + 1분봉
+            try:
+                r = requests.get(
+                    "https://api.upbit.com/v1/candles/minutes/1",
+                    params={"market": "KRW-BTC", "count": 5}, timeout=5
+                )
+                if r.status_code == 200:
+                    candles = r.json()
+                    c = candles[0]
+                    row.update({
+                        "price": c["trade_price"],
+                        "open": c["opening_price"],
+                        "high": c["high_price"],
+                        "low": c["low_price"],
+                        "volume": c["candle_acc_trade_volume"],
+                        "volume_krw": c["candle_acc_trade_price"],
+                    })
+                    # 모멘텀
+                    if len(candles) >= 5:
+                        prices = [x["trade_price"] for x in reversed(candles)]
+                        row["mom_1m"] = (prices[-1] / prices[-2] - 1) * 100 if prices[-2] else 0
+                        row["mom_5m"] = (prices[-1] / prices[0] - 1) * 100 if prices[0] else 0
+            except Exception:
+                pass
+
+            # 2) 호가 (15단계)
+            try:
+                r = requests.get(
+                    "https://api.upbit.com/v1/orderbook",
+                    params={"markets": "KRW-BTC"}, timeout=5
+                )
+                if r.status_code == 200:
+                    ob = r.json()[0]
+                    units = ob.get("orderbook_units", [])
+                    if units:
+                        bid_5 = sum(u["bid_size"] for u in units[:5])
+                        ask_5 = sum(u["ask_size"] for u in units[:5])
+                        bid_10 = sum(u["bid_size"] for u in units[:10])
+                        ask_10 = sum(u["ask_size"] for u in units[:10])
+                        total = bid_5 + ask_5
+                        row["ob_imbalance_5"] = round((bid_5 - ask_5) / total, 4) if total else 0
+                        total10 = bid_10 + ask_10
+                        row["ob_imbalance_10"] = round((bid_10 - ask_10) / total10, 4) if total10 else 0
+                        mid = (units[0]["bid_price"] + units[0]["ask_price"]) / 2
+                        row["spread_bps"] = round(
+                            (units[0]["ask_price"] - units[0]["bid_price"]) / mid * 10000, 2
+                        ) if mid else 0
+                        # 벽 감지: 잔량 상위 5%
+                        all_bids = sorted([u["bid_size"] for u in units], reverse=True)
+                        all_asks = sorted([u["ask_size"] for u in units], reverse=True)
+                        if all_bids:
+                            wall_bid = units[[u["bid_size"] for u in units].index(all_bids[0])]
+                            row["bid_wall_dist_pct"] = round(
+                                (row.get("price", mid) - wall_bid["bid_price"]) / row.get("price", mid) * 100, 3
+                            )
+                        if all_asks:
+                            wall_ask = units[[u["ask_size"] for u in units].index(all_asks[0])]
+                            row["ask_wall_dist_pct"] = round(
+                                (wall_ask["ask_price"] - row.get("price", mid)) / row.get("price", mid) * 100, 3
+                            )
+            except Exception:
+                pass
+
+            # 3) 최근 체결 (50건)
+            try:
+                r = requests.get(
+                    "https://api.upbit.com/v1/trades/ticks",
+                    params={"market": "KRW-BTC", "count": 50}, timeout=5
+                )
+                if r.status_code == 200:
+                    trades = r.json()
+                    if trades:
+                        buy_vol = sum(t["trade_volume"] for t in trades if t["ask_bid"] == "BID")
+                        sell_vol = sum(t["trade_volume"] for t in trades if t["ask_bid"] == "ASK")
+                        total_vol = buy_vol + sell_vol
+                        row["trade_intensity"] = round(buy_vol / total_vol, 4) if total_vol else 0.5
+                        large = sum(1 for t in trades if t["trade_price"] * t["trade_volume"] >= 10_000_000)
+                        row["large_trade_ratio"] = round(large / len(trades), 4)
+            except Exception:
+                pass
+
+            buffer.append(row)
+
+            # 5분마다 parquet로 저장
+            if len(buffer) >= 5:
+                try:
+                    table = pa.Table.from_pylist(buffer)
+                    fname = SNAPSHOT_DIR / f"snapshot_{now.strftime('%Y%m%d_%H')}.parquet"
+                    if fname.exists():
+                        existing = pq.read_table(fname)
+                        table = pa.concat_tables([existing, table])
+                    pq.write_table(table, fname)
+                    buffer.clear()
+                except Exception as e:
+                    log.warning(f"[수집기] parquet 저장 실패: {e}")
+
+            # DB에도 5분마다 기록
+            if now.minute % 5 == 0 and now.second < 61:
+                db_insert("scalp_market_snapshot", {
+                    "price": row.get("price"),
+                    "volume_1m": row.get("volume"),
+                    "rsi_1m": None,
+                    "ob_imbalance": row.get("ob_imbalance_5"),
+                    "trade_intensity": row.get("trade_intensity"),
+                    "spread_bps": row.get("spread_bps"),
+                })
+
+            time.sleep(60)
+
+        except Exception as e:
+            log.error(f"[수집기] 에러: {e}")
+            time.sleep(30)
+
+
+# ── 데몬 2: 롤링 백테스트 엔진 ────────────────
+
+def _daemon_backtester():
+    """6시간마다 파라미터 그리드서치 백테스트"""
+    import pickle
+    import itertools
+
+    log.info("[백테스터] 시작 — 6시간 주기")
+
+    # 초기 대기: 수집기가 데이터 쌓을 시간
+    time.sleep(120)
+
+    cycle = 0
+    while _mac_running:
+        cycle += 1
+        try:
+            log.info(f"[백테스터] 사이클 {cycle} 시작")
+            start = time.time()
+
+            # 캔들 데이터 로드
+            candles = _load_best_candles()
+            if not candles or len(candles) < 1000:
+                log.warning("[백테스터] 캔들 데이터 부족, 대기")
+                time.sleep(3600)
+                continue
+
+            # 파라미터 그리드
+            param_grid = {
+                "spike_pct": [0.3, 0.5, 0.8, 1.0, 1.5],
+                "spike_window": [180, 300, 600],
+                "whale_krw": [20_000_000, 50_000_000, 80_000_000],
+                "whale_ratio": [0.60, 0.70, 0.80],
+                "tp_pct": [0.15, 0.20, 0.30, 0.50],
+                "sl_pct": [0.5, 0.7, 1.0, 1.2],
+                "max_hold": [10, 15, 20, 30],
+            }
+
+            keys = list(param_grid.keys())
+            combos = list(itertools.product(*param_grid.values()))
+            log.info(f"[백테스터] {len(combos)} 조합 x {len(candles)} 캔들")
+
+            results = []
+            for i, vals in enumerate(combos):
+                params = dict(zip(keys, vals))
+                metrics = _run_backtest(candles, params)
+                metrics["params"] = params
+                results.append(metrics)
+
+                if (i + 1) % 500 == 0:
+                    log.info(f"  진행: {i+1}/{len(combos)}")
+
+            # 결과 정렬 (Sharpe 기준)
+            results.sort(key=lambda x: x.get("sharpe", -999), reverse=True)
+
+            # 저장
+            report = {
+                "cycle": cycle,
+                "timestamp": datetime.now(KST).isoformat(),
+                "total_combos": len(combos),
+                "candle_count": len(candles),
+                "top_10": results[:10],
+                "current_params_rank": _find_current_rank(results),
+                "elapsed_sec": round(time.time() - start),
+            }
+
+            with open(MODEL_DIR / "backtest_results.json", "w") as f:
+                json.dump(report, f, indent=2, ensure_ascii=False, default=str)
+
+            best = results[0]
+            log.info(
+                f"[백테스터] 사이클 {cycle} 완료 ({report['elapsed_sec']}s) | "
+                f"최적: sharpe={best.get('sharpe', 0):.3f}, "
+                f"승률={best.get('win_rate', 0):.1%}, "
+                f"pnl={best.get('total_pnl', 0):.2f}%"
+            )
+
+            send_telegram(
+                f"📊 [백테스터] 사이클 {cycle} 완료\n"
+                f"최적 Sharpe: {best.get('sharpe', 0):.3f}\n"
+                f"승률: {best.get('win_rate', 0):.1%}\n"
+                f"현재 파라미터 순위: {report['current_params_rank']}/{len(combos)}"
+            )
+
+            log_to_db("mac-mini", f"backtest_cycle_{cycle}", "completed", metrics=report)
+
+            # 6시간 대기
+            _sleep_interruptible(6 * 3600)
+
+        except Exception as e:
+            log.error(f"[백테스터] 에러: {e}", exc_info=True)
+            log_to_db("mac-mini", f"backtest_cycle_{cycle}", "failed", error=str(e))
+            time.sleep(1800)
+
+
+def _run_backtest(candles: list, params: dict) -> dict:
+    """단일 파라미터 조합 백테스트"""
+    tp = params["tp_pct"]
+    sl = params["sl_pct"]
+    max_hold = params["max_hold"]
+    fee = 0.1  # 왕복 수수료 %
+
+    trades = []
+    i = 30  # 초기 윈도우
+
+    while i < len(candles) - max_hold - 1:
+        # 급등 시그널 판정
+        window_start = max(0, i - params["spike_window"] // 60)
+        if window_start < i:
+            change = abs(candles[i]["trade_price"] / candles[window_start]["trade_price"] - 1) * 100
+        else:
+            change = 0
+
+        # 거래량 급증
+        vol_recent = sum(c.get("candle_acc_trade_volume", 0) for c in candles[max(0, i-3):i+1])
+        vol_prev = sum(c.get("candle_acc_trade_volume", 0) for c in candles[max(0, i-8):max(0, i-3)])
+        vol_spike = vol_recent / max(vol_prev, 0.001) if vol_prev > 0 else 1
+
+        # 진입 조건: 급등 또는 거래량 급증
+        entry = False
+        if change >= params["spike_pct"]:
+            entry = True
+        elif vol_spike >= 2.0 and change >= 0.2:
+            entry = True
+
+        if entry:
+            entry_price = candles[i]["trade_price"]
+            # 시뮬레이션
+            exit_pnl = None
+            hold_min = 0
+            for j in range(1, max_hold + 1):
+                if i + j >= len(candles):
+                    break
+                p = candles[i + j]["trade_price"]
+                pnl = (p / entry_price - 1) * 100 - fee
+                hold_min = j
+
+                if pnl >= tp:
+                    exit_pnl = pnl
+                    break
+                elif pnl <= -sl:
+                    exit_pnl = pnl
+                    break
+
+            if exit_pnl is None and hold_min > 0:
+                p = candles[i + hold_min]["trade_price"]
+                exit_pnl = (p / entry_price - 1) * 100 - fee
+
+            if exit_pnl is not None:
+                trades.append({"pnl": exit_pnl, "hold": hold_min})
+
+            i += max_hold + 1  # 쿨다운
+        else:
+            i += 1
+
+    if not trades:
+        return {"win_rate": 0, "total_pnl": 0, "sharpe": -999, "trades": 0}
+
+    pnls = [t["pnl"] for t in trades]
+    wins = sum(1 for p in pnls if p > 0)
+    avg_pnl = sum(pnls) / len(pnls)
+    std_pnl = (sum((p - avg_pnl) ** 2 for p in pnls) / len(pnls)) ** 0.5 if len(pnls) > 1 else 1
+
+    return {
+        "win_rate": round(wins / len(trades), 4),
+        "avg_pnl": round(avg_pnl, 4),
+        "total_pnl": round(sum(pnls), 2),
+        "sharpe": round(avg_pnl / std_pnl, 4) if std_pnl > 0 else 0,
+        "trades": len(trades),
+        "avg_hold": round(sum(t["hold"] for t in trades) / len(trades), 1),
+    }
+
+
+def _find_current_rank(results: list) -> int:
+    """현재 봇 파라미터의 순위 찾기"""
+    current = {
+        "spike_pct": 0.8, "spike_window": 300,
+        "whale_krw": 50_000_000, "whale_ratio": 0.70,
+        "tp_pct": 0.20, "sl_pct": 1.2, "max_hold": 30,
+    }
+    for i, r in enumerate(results):
+        p = r.get("params", {})
+        if all(p.get(k) == v for k, v in current.items()):
+            return i + 1
+    return -1
+
+
+# ── 데몬 3: 시장 레짐 탐지 + 적응형 필터 ────────────────
+
+def _daemon_regime():
+    """3시간마다 HMM 레짐 탐지 + 레짐별 LightGBM 필터 학습"""
     import pickle
 
-    for days in [7, 14, 30]:
-        cache = MODEL_DIR / f"candles_{days}d.pkl"
-        if cache.exists():
-            log.info(f"  {days}일 캐시 존재, 스킵")
+    log.info("[레짐] 시작 — 3시간 주기")
+
+    # 초기 대기: 최소 데이터 필요
+    time.sleep(300)
+
+    cycle = 0
+    while _mac_running:
+        cycle += 1
+        try:
+            log.info(f"[레짐] 사이클 {cycle} 시작")
+            start = time.time()
+
+            candles = _load_best_candles()
+            if not candles or len(candles) < 500:
+                log.warning("[레짐] 데이터 부족, 대기")
+                time.sleep(3600)
+                continue
+
+            # Phase A: HMM 레짐 탐지
+            regime_model, regime_labels = _train_hmm_regime(candles)
+
+            if regime_model is not None:
+                with open(MODEL_DIR / "regime_detector.pkl", "wb") as f:
+                    pickle.dump({
+                        "model": regime_model,
+                        "n_states": regime_model.n_components,
+                        "cycle": cycle,
+                        "timestamp": datetime.now(KST).isoformat(),
+                    }, f)
+
+                # 레짐별 통계
+                regime_stats = _analyze_regimes(candles, regime_labels)
+                log.info(f"[레짐] HMM {regime_model.n_components}-state: {regime_stats}")
+
+            # Phase B: 레짐별 LightGBM 필터
+            filter_metrics = _train_regime_filters(candles, regime_labels)
+
+            elapsed = round(time.time() - start)
+            log.info(f"[레짐] 사이클 {cycle} 완료 ({elapsed}s)")
+
+            log_to_db("mac-mini", f"regime_cycle_{cycle}", "completed",
+                      metrics={"regime_stats": regime_stats, "filter": filter_metrics, "elapsed": elapsed})
+
+            if cycle % 4 == 0:  # 12시간마다 보고
+                send_telegram(
+                    f"🎯 [레짐] 사이클 {cycle} 완료\n"
+                    f"레짐: {regime_stats}\n"
+                    f"필터: {filter_metrics}"
+                )
+
+            _sleep_interruptible(3 * 3600)
+
+        except Exception as e:
+            log.error(f"[레짐] 에러: {e}", exc_info=True)
+            log_to_db("mac-mini", f"regime_cycle_{cycle}", "failed", error=str(e))
+            time.sleep(1800)
+
+
+def _train_hmm_regime(candles: list):
+    """HMM으로 시장 레짐 분류"""
+    try:
+        from hmmlearn.hmm import GaussianHMM
+    except ImportError:
+        log.warning("[레짐] hmmlearn 미설치, sklearn GMM 대체")
+        return _train_gmm_regime(candles)
+
+    # 피처: 5분 수익률, 변동성, 거래량 변화율
+    features = []
+    for i in range(5, len(candles)):
+        ret = (candles[i]["trade_price"] / candles[i-1]["trade_price"] - 1) * 100
+        ret_5 = (candles[i]["trade_price"] / candles[i-5]["trade_price"] - 1) * 100
+        vol = candles[i].get("candle_acc_trade_volume", 0)
+        vol_prev = candles[i-5].get("candle_acc_trade_volume", 0.001)
+        vol_ratio = vol / max(vol_prev, 0.001)
+        # 변동성 (5분 high-low range)
+        highs = [candles[j]["high_price"] for j in range(i-4, i+1)]
+        lows = [candles[j]["low_price"] for j in range(i-4, i+1)]
+        volatility = (max(highs) - min(lows)) / candles[i]["trade_price"] * 100
+        features.append([ret, ret_5, vol_ratio, volatility])
+
+    X = np.array(features)
+
+    # 3, 4, 5 state로 실험, BIC로 선택
+    best_model, best_bic = None, float("inf")
+    for n in [3, 4]:
+        try:
+            model = GaussianHMM(n_components=n, covariance_type="diag",
+                                n_iter=200, random_state=42)
+            model.fit(X)
+            bic = -2 * model.score(X) + n * X.shape[1] * np.log(len(X))
+            if bic < best_bic:
+                best_bic = bic
+                best_model = model
+        except Exception:
             continue
-        candles = collect_candles(days=days)
-        with open(cache, "wb") as f:
-            pickle.dump(candles, f)
-        log.info(f"  {days}일: {len(candles)}건 수집 완료")
 
-    return {"status": "data_collected", "periods": [7, 14, 30]}
+    if best_model is None:
+        return None, None
+
+    labels = best_model.predict(X)
+    # 앞의 5개는 레짐 미지정
+    full_labels = np.concatenate([np.full(5, -1), labels])
+    return best_model, full_labels
 
 
-def _mac_phase2_lgbm():
-    """LightGBM 회귀 모델 — 3가지 기간으로 훈련"""
-    from scalp_ml.train_lgbm import build_dataset, train_model
+def _train_gmm_regime(candles: list):
+    """hmmlearn 없을 때 GMM 대체"""
+    from sklearn.mixture import GaussianMixture
+
+    features = []
+    for i in range(5, len(candles)):
+        ret = (candles[i]["trade_price"] / candles[i-1]["trade_price"] - 1) * 100
+        vol = candles[i].get("candle_acc_trade_volume", 0)
+        vol_prev = candles[i-5].get("candle_acc_trade_volume", 0.001)
+        features.append([ret, vol / max(vol_prev, 0.001)])
+
+    X = np.array(features)
+    best_model, best_bic = None, float("inf")
+    for n in [3, 4]:
+        model = GaussianMixture(n_components=n, random_state=42, max_iter=200)
+        model.fit(X)
+        bic = model.bic(X)
+        if bic < best_bic:
+            best_bic = bic
+            best_model = model
+
+    labels = best_model.predict(X)
+    full_labels = np.concatenate([np.full(5, -1), labels])
+    return best_model, full_labels
+
+
+def _analyze_regimes(candles: list, labels) -> dict:
+    """레짐별 통계 분석"""
+    if labels is None:
+        return {}
+    stats = {}
+    unique = set(labels)
+    for regime in unique:
+        if regime == -1:
+            continue
+        mask = labels == regime
+        indices = np.where(mask)[0]
+        prices = [candles[i]["trade_price"] for i in indices if i < len(candles)]
+        if len(prices) < 2:
+            continue
+        returns = [(prices[j] / prices[j-1] - 1) * 100 for j in range(1, len(prices))]
+        stats[f"regime_{regime}"] = {
+            "count": int(len(indices)),
+            "pct": round(len(indices) / len(labels) * 100, 1),
+            "avg_ret": round(np.mean(returns), 4) if returns else 0,
+            "volatility": round(np.std(returns), 4) if returns else 0,
+        }
+    return stats
+
+
+def _train_regime_filters(candles: list, regime_labels) -> dict:
+    """레짐별 LightGBM 시그널 필터"""
+    try:
+        import lightgbm as lgb
+        from scalp_ml.train_lgbm import build_dataset, FEATURE_NAMES
+    except ImportError:
+        return {"status": "skipped", "reason": "lightgbm 미설치"}
+
+    if regime_labels is None or len(candles) < 1000:
+        return {"status": "insufficient_data"}
+
+    X, y_cls, y_reg = build_dataset(candles)
+
+    # 레짐 라벨 피처 추가
+    min_len = min(len(X), len(regime_labels))
+    X_ext = np.column_stack([X[:min_len], regime_labels[:min_len]])
+    y_cls_ext = y_cls[:min_len]
+    y_reg_ext = y_reg[:min_len]
+    feat_names = FEATURE_NAMES + ["regime"]
+
+    split = int(len(X_ext) * 0.8)
+    train_data = lgb.Dataset(X_ext[:split], label=y_reg_ext[:split], feature_name=feat_names)
+    val_data = lgb.Dataset(X_ext[split:], label=y_reg_ext[split:], reference=train_data)
+
+    params = {
+        "objective": "regression", "metric": "mae",
+        "num_leaves": 31, "max_depth": 6, "learning_rate": 0.03,
+        "feature_fraction": 0.8, "bagging_fraction": 0.8, "bagging_freq": 5,
+        "verbose": -1,
+    }
+    model = lgb.train(params, train_data, valid_sets=[val_data],
+                      callbacks=[lgb.early_stopping(30)])
+
+    pred = model.predict(X_ext[split:])
+    mae = float(np.mean(np.abs(y_reg_ext[split:] - pred)))
+    corr = float(np.corrcoef(y_reg_ext[split:], pred)[0, 1]) if len(pred) > 1 else 0
+
     import pickle
+    with open(MODEL_DIR / "regime_filters.pkl", "wb") as f:
+        pickle.dump({"model": model, "features": feat_names, "mae": mae, "corr": corr}, f)
 
-    results = {}
+    return {"mae": round(mae, 4), "corr": round(corr, 4)}
+
+
+# ── 공통 유틸 (Mac Mini) ────────────────
+
+def _mac_init_data():
+    """초기 캔들 데이터 확보"""
+    import pickle
+    from scalp_ml.train_lgbm import collect_candles
+
     for days in [7, 14, 30]:
         cache = MODEL_DIR / f"candles_{days}d.pkl"
         if not cache.exists():
-            cache = MODEL_DIR / "candles_cache.pkl"
-        with open(cache, "rb") as f:
-            candles = pickle.load(f)
-
-        log.info(f"\n  LightGBM {days}일 훈련...")
-        X, y_cls, y_reg = build_dataset(candles)
-        metrics = train_model(X, y_cls, y_reg, save=(days == 14))
-        results[f"lgbm_{days}d"] = metrics
-        log.info(f"  {days}일: MAE={metrics['mae']:.4f}, Corr={metrics['correlation']:.4f}")
-
-    return results
+            log.info(f"  {days}일 캔들 수집 중...")
+            candles = collect_candles(days=days)
+            with open(cache, "wb") as f:
+                pickle.dump(candles, f)
+            log.info(f"  {days}일: {len(candles)}건 수집")
+        else:
+            log.info(f"  {days}일 캐시 존재")
 
 
-def _mac_phase3_xgboost():
-    """XGBoost 대조 모델"""
-    try:
-        import xgboost as xgb
-    except ImportError:
-        log.warning("xgboost 미설치 — pip install xgboost 필요")
-        return {"status": "skipped", "reason": "xgboost not installed"}
-
+def _load_best_candles() -> list:
+    """가장 큰 캔들 캐시 로드"""
     import pickle
-    from scalp_ml.train_lgbm import build_dataset, FEATURE_NAMES
-    from sklearn.metrics import mean_absolute_error
-    import numpy as np
+    for days in [30, 14, 7]:
+        cache = MODEL_DIR / f"candles_{days}d.pkl"
+        if cache.exists():
+            with open(cache, "rb") as f:
+                return pickle.load(f)
+    return []
 
-    cache = MODEL_DIR / "candles_14d.pkl"
-    if not cache.exists():
-        cache = MODEL_DIR / "candles_cache.pkl"
-    with open(cache, "rb") as f:
-        candles = pickle.load(f)
 
-    X, y_cls, y_reg = build_dataset(candles)
-    split = int(len(X) * 0.8)
-    X_train, X_test = X[:split], X[split:]
-    yr_train, yr_test = y_reg[:split], y_reg[split:]
+def _sleep_interruptible(seconds: float):
+    """_mac_running 체크하면서 대기"""
+    end = time.time() + seconds
+    while _mac_running and time.time() < end:
+        time.sleep(30)
 
-    model = xgb.XGBRegressor(
-        n_estimators=500, max_depth=6, learning_rate=0.03,
-        subsample=0.8, colsample_bytree=0.8, reg_alpha=0.1,
-        early_stopping_rounds=50, verbosity=0,
+
+def _mac_daily_report(elapsed_h: float):
+    """일일 보고"""
+    snap_count = len(list(SNAPSHOT_DIR.glob("snapshot_*.parquet")))
+    bt_file = MODEL_DIR / "backtest_results.json"
+    regime_file = MODEL_DIR / "regime_detector.pkl"
+
+    msg = (
+        f"📋 [Mac Mini] 일일 보고 (Day {int(elapsed_h/24)+1})\n"
+        f"경과: {elapsed_h:.0f}시간\n"
+        f"스냅샷: {snap_count}개 파일\n"
+        f"백테스트: {'완료' if bt_file.exists() else '대기'}\n"
+        f"레짐: {'완료' if regime_file.exists() else '대기'}"
     )
-    model.fit(X_train, yr_train, eval_set=[(X_test, yr_test)], verbose=False)
 
-    yr_pred = model.predict(X_test)
-    mae = mean_absolute_error(yr_test, yr_pred)
-    corr = float(np.corrcoef(yr_test, yr_pred)[0, 1])
+    if bt_file.exists():
+        with open(bt_file) as f:
+            bt = json.load(f)
+        top = bt.get("top_10", [{}])[0]
+        msg += f"\n최적 Sharpe: {top.get('sharpe', 0):.3f}"
+        msg += f"\n현재 순위: {bt.get('current_params_rank', '?')}"
 
-    with open(MODEL_DIR / "xgb_scalp_latest.pkl", "wb") as f:
-        pickle.dump({"model": model, "features": FEATURE_NAMES}, f)
-
-    return {"mae": round(mae, 4), "correlation": round(corr, 4), "model": "xgboost"}
-
-
-def _mac_phase4_features():
-    """확장 피처 실험 — 기본 15개 → 25개+"""
-    return {"status": "placeholder", "note": "피처 실험은 데이터 축적 후 실행"}
+    send_telegram(msg)
 
 
-def _mac_phase5_hyperparam():
-    """하이퍼파라미터 그리드 탐색"""
-    import pickle
-    from scalp_ml.train_lgbm import build_dataset, FEATURE_NAMES
-    import lightgbm as lgb
-    import numpy as np
+def _mac_final_report():
+    """7일 최종 보고"""
+    bt_file = MODEL_DIR / "backtest_results.json"
+    regime_file = MODEL_DIR / "regime_detector.pkl"
 
-    cache = MODEL_DIR / "candles_14d.pkl"
-    if not cache.exists():
-        cache = MODEL_DIR / "candles_cache.pkl"
-    with open(cache, "rb") as f:
-        candles = pickle.load(f)
+    report = {"timestamp": datetime.now(KST).isoformat()}
 
-    X, y_cls, y_reg = build_dataset(candles)
-    split = int(len(X) * 0.8)
+    if bt_file.exists():
+        with open(bt_file) as f:
+            report["backtest"] = json.load(f)
 
-    grid = [
-        {"num_leaves": 31, "max_depth": 6, "lr": 0.03},
-        {"num_leaves": 63, "max_depth": 8, "lr": 0.03},
-        {"num_leaves": 31, "max_depth": 6, "lr": 0.01},
-        {"num_leaves": 127, "max_depth": 10, "lr": 0.05},
-        {"num_leaves": 15, "max_depth": 4, "lr": 0.05},
-    ]
+    if regime_file.exists():
+        report["regime"] = "trained"
 
-    best_mae = 999
-    best_config = None
-    results = []
+    snap_count = len(list(SNAPSHOT_DIR.glob("snapshot_*.parquet")))
+    report["snapshots"] = snap_count
 
-    for cfg in grid:
-        params = {
-            "objective": "regression", "metric": "mae",
-            "num_leaves": cfg["num_leaves"], "max_depth": cfg["max_depth"],
-            "learning_rate": cfg["lr"], "n_estimators": 1000,
-            "feature_fraction": 0.8, "bagging_fraction": 0.8, "bagging_freq": 5,
-            "verbose": -1,
-        }
-        train_data = lgb.Dataset(X[:split], label=y_reg[:split], feature_name=FEATURE_NAMES)
-        val_data = lgb.Dataset(X[split:], label=y_reg[split:], reference=train_data)
+    with open(MODEL_DIR / "mac_mini_final_report.json", "w") as f:
+        json.dump(report, f, indent=2, ensure_ascii=False, default=str)
 
-        model = lgb.train(params, train_data, valid_sets=[val_data],
-                         callbacks=[lgb.early_stopping(30)])
-        pred = model.predict(X[split:])
-        mae = float(np.mean(np.abs(y_reg[split:] - pred)))
-        corr = float(np.corrcoef(y_reg[split:], pred)[0, 1])
-
-        results.append({**cfg, "mae": round(mae, 4), "corr": round(corr, 4)})
-        if mae < best_mae:
-            best_mae = mae
-            best_config = cfg
-        log.info(f"  {cfg}: MAE={mae:.4f}, Corr={corr:.4f}")
-
-    return {"best_config": best_config, "best_mae": round(best_mae, 4), "all_results": results}
-
-
-def _mac_phase6_ensemble():
-    """앙상블 (LightGBM + XGBoost 평균)"""
-    return {"status": "placeholder", "note": "개별 모델 완료 후 앙상블 구축"}
-
-
-def _mac_phase7_final():
-    """최종 평가 — 모든 모델 비교"""
-    metrics_file = MODEL_DIR / "lgbm_scalp_metrics.json"
-    if metrics_file.exists():
-        with open(metrics_file) as f:
-            return {"final_metrics": json.load(f)}
-    return {"status": "pending_evaluation"}
+    log.info(f"[Mac Mini] 최종 보고서 저장: {MODEL_DIR / 'mac_mini_final_report.json'}")
 
 
 # ═══════════════════════════════════════════════════
